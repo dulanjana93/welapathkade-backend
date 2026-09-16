@@ -1,0 +1,120 @@
+// Welapathkade Phase 1 — Identity & Authentication models only.
+// Domain models beyond auth/users are deferred intentionally.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  PUBLIC
+  ASTROLOGER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+enum Language {
+  SI
+  EN
+}
+
+enum OtpPurpose {
+  REGISTRATION
+  LOGIN
+  PHONE_CHANGE
+}
+
+enum OtpStatus {
+  PENDING
+  VERIFIED
+  EXPIRED
+  LOCKED
+}
+
+enum DevicePlatform {
+  IOS
+  ANDROID
+  WEB
+}
+
+model User {
+  id               String     @id @default(cuid())
+  phone            String     @unique
+  name             String
+  role             UserRole
+  status           UserStatus @default(ACTIVE)
+  language         Language   @default(SI)
+  referralCode     String     @unique
+  referredByUserId String?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  referredBy  User?  @relation("UserReferrals", fields: [referredByUserId], references: [id])
+  referrals   User[] @relation("UserReferrals")
+
+  sessions         UserSession[]
+  devices          UserDevice[]
+  otpVerifications OtpVerification[]
+
+  @@index([referredByUserId])
+}
+
+model UserSession {
+  id               String    @id @default(cuid())
+  userId           String
+  refreshTokenHash String
+  deviceId         String?
+  ip               String?
+  userAgent        String?   @db.VarChar(512)
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  createdAt        DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([refreshTokenHash])
+}
+
+model OtpVerification {
+  id         String     @id @default(cuid())
+  userId     String?
+  phone      String
+  purpose    OtpPurpose
+  codeHash   String
+  status     OtpStatus  @default(PENDING)
+  expiresAt  DateTime
+  verifiedAt DateTime?
+  attempts   Int        @default(0)
+  createdAt  DateTime   @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([phone])
+  @@index([expiresAt])
+  @@index([phone, purpose, status])
+}
+
+model UserDevice {
+  id         String         @id @default(cuid())
+  userId     String
+  fcmToken   String         @unique
+  platform   DevicePlatform
+  lastSeenAt DateTime       @default(now())
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}

@@ -1,0 +1,38 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: welapathkade-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: welapathkade
+      MYSQL_USER: welapathkade
+      MYSQL_PASSWORD: welapathkade
+    ports:
+      - "3307:3306"
+    volumes:
+      - welapathkade_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "welapathkade", "-pwelapathkade"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: welapathkade-redis
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    volumes:
+      - welapathkade_redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  welapathkade_mysql_data:
+  welapathkade_redis_data:
