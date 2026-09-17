@@ -35,6 +35,6 @@ import { TokenService } from './token.service';
       useExisting: ConsoleSmsSender,
     },
   ],
-  exports: [AuthService, JwtModule, PassportModule],
+  exports: [AuthService, TokenService, JwtModule, PassportModule],
 })
 export class AuthModule {}

@@ -105,9 +105,14 @@ OTP must not be stored as plaintext.
 
 Purpose examples:
 
-REGISTRATION
+REGISTRATION (legacy alias for PUBLIC_REGISTRATION)
+PUBLIC_REGISTRATION
+ASTROLOGER_REGISTRATION
 LOGIN
 PHONE_CHANGE
+
+The OTP purpose stored on the verification row is authoritative for registration role creation.
+Clients cannot set User.role directly on verify.
 6. UserDevice
 UserDevice
 
@@ -160,6 +165,36 @@ INACTIVE
 SUSPENDED
 
 The astrologer is represented by the central User record plus this profile.
+
+Operational profile status is separate from onboarding application status.
+
+8b. AstrologerApplication
+AstrologerApplication
+
+id
+astrologerProfileId UNIQUE
+status
+rejectionReason NULL
+submittedAt NULL
+reviewedAt NULL
+reviewedByAdminId NULL
+createdAt
+updatedAt
+
+Status:
+
+DRAFT
+PENDING_REVIEW
+REJECTED
+APPROVED
+
+Lifecycle:
+
+DRAFT → PENDING_REVIEW → APPROVED
+DRAFT → PENDING_REVIEW → REJECTED → (edit) → PENDING_REVIEW
+
+On APPROVE: application=APPROVED and profile.status=ACTIVE.
+On REJECT: application=REJECTED and profile.status remains INACTIVE.
 
 9. Service
 Service

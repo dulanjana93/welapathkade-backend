@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Inject,
   Injectable,
 } from '@nestjs/common';
@@ -15,6 +16,21 @@ import { UsersService } from '../users/users.service';
 import { OtpService } from './otp.service';
 import { TokenService } from './token.service';
 import { SMS_SENDER, type SmsSender } from './interfaces/sms-sender.interface';
+
+function isPublicRegistration(purpose: OtpPurpose): boolean {
+  return (
+    purpose === OtpPurpose.PUBLIC_REGISTRATION ||
+    purpose === OtpPurpose.REGISTRATION
+  );
+}
+
+function isAstrologerRegistration(purpose: OtpPurpose): boolean {
+  return purpose === OtpPurpose.ASTROLOGER_REGISTRATION;
+}
+
+function isRegistrationPurpose(purpose: OtpPurpose): boolean {
+  return isPublicRegistration(purpose) || isAstrologerRegistration(purpose);
+}
 
 @Injectable()
 export class AuthService {
@@ -36,11 +52,20 @@ export class AuthService {
 
     let resolvedPurpose = purpose;
     if (!resolvedPurpose) {
-      resolvedPurpose = existing ? OtpPurpose.LOGIN : OtpPurpose.REGISTRATION;
+      resolvedPurpose = existing
+        ? OtpPurpose.LOGIN
+        : OtpPurpose.PUBLIC_REGISTRATION;
     }
 
-    if (resolvedPurpose === OtpPurpose.REGISTRATION && existing) {
-      throw new BadRequestException('Phone number is already registered');
+    // Normalize legacy REGISTRATION to PUBLIC_REGISTRATION for storage.
+    if (resolvedPurpose === OtpPurpose.REGISTRATION) {
+      resolvedPurpose = OtpPurpose.PUBLIC_REGISTRATION;
+    }
+
+    if (isRegistrationPurpose(resolvedPurpose) && existing) {
+      throw new ConflictException(
+        'Phone number is already registered. Please log in instead.',
+      );
     }
 
     if (resolvedPurpose === OtpPurpose.LOGIN && !existing) {
@@ -48,7 +73,7 @@ export class AuthService {
     }
 
     if (resolvedPurpose === OtpPurpose.PHONE_CHANGE) {
-      throw new BadRequestException('PHONE_CHANGE is not supported in Phase 1');
+      throw new BadRequestException('PHONE_CHANGE is not supported yet');
     }
 
     const result = await this.otpService.requestOtp({
@@ -83,23 +108,31 @@ export class AuthService {
       this.usersService.assertCanAuthenticate(existing);
     }
 
-    const purpose = existing ? OtpPurpose.LOGIN : OtpPurpose.REGISTRATION;
-    await this.otpService.verifyOtp({
+    // Purpose comes from the stored OTP record — not from client role claims.
+    const verifiedOtp = await this.otpService.verifyOtp({
       phone,
       code: params.code,
-      purpose,
     });
+    const purpose = verifiedOtp.purpose;
 
     let user: User;
 
-    if (existing) {
+    if (purpose === OtpPurpose.LOGIN) {
+      if (!existing) {
+        throw new BadRequestException('No account found for this phone number');
+      }
       user = existing;
       if (params.referralCode) {
         throw new BadRequestException(
           'Referral code cannot be changed after registration',
         );
       }
-    } else {
+    } else if (isRegistrationPurpose(purpose)) {
+      if (existing) {
+        throw new ConflictException(
+          'Phone number is already registered. Please log in instead.',
+        );
+      }
       if (!params.name?.trim()) {
         throw new BadRequestException('Name is required for registration');
       }
@@ -115,16 +148,23 @@ export class AuthService {
         referredByUserId = referrer.id;
       }
 
-      user = await this.usersService.createPublicUser({
-        phone,
-        name: params.name,
-        language: params.language,
-        referredByUserId,
-      });
-
-      if (user.referredByUserId && user.referredByUserId === user.id) {
-        throw new BadRequestException('Self-referral is not allowed');
+      if (isAstrologerRegistration(purpose)) {
+        user = await this.usersService.createAstrologerWithOnboarding({
+          phone,
+          name: params.name,
+          language: params.language,
+          referredByUserId,
+        });
+      } else {
+        user = await this.usersService.createPublicUser({
+          phone,
+          name: params.name,
+          language: params.language,
+          referredByUserId,
+        });
       }
+    } else {
+      throw new BadRequestException('Unsupported OTP purpose');
     }
 
     const tokens = await this.tokenService.issueSession({
@@ -146,7 +186,7 @@ export class AuthService {
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken,
       expiresIn: tokens.expiresIn,
-      user: this.usersService.toSelfView(user),
+      user: await this.usersService.toAuthMeView(user),
     };
   }
 
@@ -162,7 +202,7 @@ export class AuthService {
       accessToken: rotated.accessToken,
       refreshToken: rotated.refreshToken,
       expiresIn: rotated.expiresIn,
-      user: this.usersService.toSelfView(rotated.user),
+      user: await this.usersService.toAuthMeView(rotated.user),
     };
   }
 

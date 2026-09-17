@@ -41,11 +41,12 @@ earn referral commissions
 
 An astrologer can:
 
-register using OTP
-create profile
+register using OTP with ASTROLOGER_REGISTRATION purpose
+create/update profile during onboarding
 select services
 set service prices
-define availability
+submit an application for admin review
+define availability (later phase)
 receive consultation requests
 accept/decline requests
 propose appointment times
@@ -54,6 +55,22 @@ reply to follow-up messages
 receive earnings
 receive referral earnings
 receive payouts
+
+Registration creates:
+
+User.role = ASTROLOGER
+AstrologerProfile.status = INACTIVE
+AstrologerApplication.status = DRAFT
+
+Public discovery requires profile ACTIVE (after admin approval) plus at least one active priced service.
+
+Role is immutable through normal self-service registration. PUBLIC → ASTROLOGER conversion is not supported in this phase.
+
+Status distinction (do not conflate):
+
+- User.role — PUBLIC | ASTROLOGER | ADMIN (account type; set by OTP purpose at registration)
+- AstrologerProfile.status — ACTIVE | INACTIVE | SUSPENDED (operational discovery/eligibility)
+- AstrologerApplication.status — DRAFT | PENDING_REVIEW | REJECTED | APPROVED (onboarding review lifecycle)
 2.3 Admin
 
 V1 has one Admin role.

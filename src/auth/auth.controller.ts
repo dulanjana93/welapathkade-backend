@@ -81,7 +81,7 @@ export class AuthController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get the authenticated user profile (includes own phone)' })
   me(@CurrentUser() user: User) {
-    return this.usersService.toSelfView(user);
+    return this.usersService.toAuthMeView(user);
   }
 
   @Post('devices')

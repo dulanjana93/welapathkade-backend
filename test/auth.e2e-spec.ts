@@ -82,7 +82,7 @@ describe('Auth (e2e)', () => {
   it('requests OTP without returning the code', async () => {
     const res = await requestOtp(phoneA);
     expect(res.body.message).toBe('OTP sent');
-    expect(res.body.purpose).toBe('REGISTRATION');
+    expect(res.body.purpose).toBe('PUBLIC_REGISTRATION');
     expect(res.body).not.toHaveProperty('code');
     expect(res.body).not.toHaveProperty('otp');
     expect(JSON.stringify(res.body)).not.toContain(readDevOtp(phoneA));

@@ -22,7 +22,12 @@
     "prisma:validate": "prisma validate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
-    "bootstrap:admin": "ts-node -r tsconfig-paths/register src/scripts/bootstrap-admin.ts"
+    "bootstrap:admin": "ts-node -r tsconfig-paths/register src/scripts/bootstrap-admin.ts",
+    "prisma:seed": "ts-node -r tsconfig-paths/register prisma/seed.ts",
+    "prisma:migrate:deploy": "prisma migrate deploy"
+  },
+  "prisma": {
+    "seed": "ts-node -r tsconfig-paths/register prisma/seed.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",

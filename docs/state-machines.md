@@ -312,6 +312,26 @@ SUSPENDED → ACTIVE
 
 Suspension is Admin controlled.
 
+12b. Astrologer Application Status
+
+Possible:
+
+DRAFT
+PENDING_REVIEW
+REJECTED
+APPROVED
+
+Transitions:
+
+DRAFT → PENDING_REVIEW
+REJECTED → PENDING_REVIEW
+PENDING_REVIEW → APPROVED
+PENDING_REVIEW → REJECTED
+
+Approval also sets AstrologerProfile.status = ACTIVE.
+Rejection keeps AstrologerProfile.status = INACTIVE.
+Admin operational suspension uses AstrologerProfile.status and is separate from application review.
+
 13. User Status
 
 Possible:

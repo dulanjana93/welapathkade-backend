@@ -132,6 +132,8 @@ authentication
 refresh sessions
 logout/revocation
 device/session management
+registration intent via OtpPurpose (PUBLIC_REGISTRATION / ASTROLOGER_REGISTRATION / LOGIN)
+role assignment from OTP purpose (never from client-supplied role)
 users
 
 Responsible for:
@@ -148,6 +150,9 @@ Responsible for:
 astrologer profile
 astrologer lifecycle
 astrologer-specific configuration
+onboarding application (AstrologerApplication)
+admin approve/reject of applications
+audit of application review actions
 services
 
 Responsible for:
