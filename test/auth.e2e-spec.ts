@@ -48,6 +48,9 @@ describe('Auth (e2e)', () => {
   });
 
   beforeEach(async () => {
+    await prisma.consultationFile.deleteMany();
+    await prisma.consultation.deleteMany();
+    await prisma.file.deleteMany();
     await prisma.userSession.deleteMany();
     await prisma.userDevice.deleteMany();
     await prisma.otpVerification.deleteMany();

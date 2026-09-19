@@ -49,6 +49,9 @@ describe('Phase 2.5 Role registration & onboarding (e2e)', () => {
   });
 
   beforeEach(async () => {
+    await prisma.consultationFile.deleteMany();
+    await prisma.consultation.deleteMany();
+    await prisma.file.deleteMany();
     await prisma.auditLog.deleteMany();
     await prisma.availabilityException.deleteMany();
     await prisma.weeklyAvailability.deleteMany();

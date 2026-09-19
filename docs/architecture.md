@@ -179,8 +179,23 @@ Responsible for:
 
 consultation requests
 consultation lifecycle
-consultation files
-request SLA
+consultation files (metadata + authorization boundary)
+request SLA (12h from submittedAt)
+preferred-time eligibility via AvailabilityService (no reservation)
+service name/price snapshot at request creation
+
+Phase 4 endpoints:
+
+- POST /consultations (PUBLIC)
+- GET /consultations/me (PUBLIC)
+- GET /consultations/:id (PUBLIC owner or assigned ASTROLOGER)
+- POST /consultations/:id/cancel (PUBLIC owner)
+- GET /astrologers/me/consultations (ASTROLOGER)
+- GET /astrologers/me/consultations/:id (ASTROLOGER; sets viewedAt once)
+- POST /astrologers/me/consultations/:id/accept (ASTROLOGER)
+- POST /astrologers/me/consultations/:id/decline (ASTROLOGER)
+
+Does **not** (later phases): appointment proposals, payment, BookingGuard reservation, refunds, chat, video.
 appointments
 
 Responsible for:

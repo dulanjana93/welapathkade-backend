@@ -49,6 +49,31 @@ describe('ServicesService', () => {
     expect(rows[0].minPrice).toBe('100.00');
   });
 
+  it('lists all services for admin including inactive', async () => {
+    prisma.service.findMany.mockResolvedValue([
+      {
+        id: '1',
+        code: 'A',
+        nameSi: 'අ',
+        nameEn: 'A',
+        descriptionSi: null,
+        descriptionEn: null,
+        minPrice: new Prisma.Decimal('100.00'),
+        maxPrice: new Prisma.Decimal('200.00'),
+        status: ServiceStatus.INACTIVE,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ]);
+
+    const rows = await service.listAllAdmin();
+    expect(prisma.service.findMany).toHaveBeenCalledWith({
+      orderBy: { nameEn: 'asc' },
+    });
+    expect(rows[0].status).toBe(ServiceStatus.INACTIVE);
+    expect(rows[0]).toHaveProperty('createdAt');
+  });
+
   it('rejects invalid min/max on create', async () => {
     await expect(
       service.create({

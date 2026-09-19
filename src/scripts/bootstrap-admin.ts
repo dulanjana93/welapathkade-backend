@@ -1,11 +1,19 @@
 /**
  * Safe admin bootstrap for local/dev use.
- * Creates the initial ADMIN user if the phone is unused (or already ADMIN).
+ * Creates or updates an ADMIN user with email + password (Argon2id).
  *
  * Usage:
- *   npx ts-node -r tsconfig-paths/register src/scripts/bootstrap-admin.ts --phone +94770000000 --name "Platform Admin"
+ *   npx ts-node -r tsconfig-paths/register src/scripts/bootstrap-admin.ts \
+ *     --email admin@welapathkade.local \
+ *     --password "ChangeMeNow!" \
+ *     --name "Platform Admin"
  *
+ * Optional:
+ *   --phone +9477XXXXXXX   (legacy; otherwise a synthetic phone is assigned)
+ *
+ * Password may also be supplied via ADMIN_BOOTSTRAP_PASSWORD env var.
  * Never expose admin signup as a public HTTP endpoint.
+ * Never prints the password.
  */
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '../app.module';
@@ -21,30 +29,45 @@ function readArg(name: string): string | undefined {
 }
 
 async function main() {
-  const rawPhone = readArg('phone');
+  const email = readArg('email');
+  const password =
+    readArg('password') ?? process.env.ADMIN_BOOTSTRAP_PASSWORD;
   const name = readArg('name') ?? 'Platform Admin';
+  const rawPhone = readArg('phone');
 
-  if (!rawPhone) {
-    throw new Error('Missing required --phone argument');
+  if (!email?.trim()) {
+    throw new Error('Missing required --email argument');
+  }
+  if (!password) {
+    throw new Error(
+      'Missing password: pass --password or set ADMIN_BOOTSTRAP_PASSWORD',
+    );
   }
 
-  const phone = normalizePhone(rawPhone);
+  const phone = rawPhone ? normalizePhone(rawPhone) : undefined;
+
   const app = await NestFactory.createApplicationContext(AppModule, {
     logger: ['error', 'warn', 'log'],
   });
 
   try {
     const usersService = app.get(UsersService);
-    const admin = await usersService.createAdminUser({ phone, name });
+    const admin = await usersService.createAdminUser({
+      email,
+      password,
+      name,
+      phone,
+    });
     // eslint-disable-next-line no-console
     console.log(
       JSON.stringify(
         {
           message: 'Admin bootstrap complete',
           id: admin.id,
-          phone: admin.phone,
+          email: admin.email,
           role: admin.role,
-          referralCode: admin.referralCode,
+          status: admin.status,
+          // intentionally omit password / passwordHash / tokens
         },
         null,
         2,

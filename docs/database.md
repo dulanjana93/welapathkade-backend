@@ -328,15 +328,21 @@ astrologerServiceId
 serviceId
 
 requestedPrice
+serviceNameSi
+serviceNameEn
 
 message
 
 status
 
+preferredStartAt
+preferredEndAt NULL
+
 submittedAt
 viewedAt
 respondedAt
 expiresAt
+declineReason NULL
 completedAt
 
 createdAt
@@ -350,9 +356,26 @@ DECLINED
 EXPIRED
 CANCELLED
 
-requestedPrice is the price at request time if needed for audit/display.
+`preferredStartAt` is the customer's preferred time (UTC). It is **not** an appointment.
+
+`preferredEndAt` is optional preference only — final duration is chosen by the astrologer in a later appointment proposal.
+
+`requestedPrice` / service names are snapshotted at request time for display/audit.
 
 Final appointment price must be snapshotted separately.
+
+Indexes:
+
+customerId
+astrologerId
+status
+expiresAt
+submittedAt
+(astrologerId, status, submittedAt)
+(customerId, status, submittedAt)
+(status, expiresAt)
+
+No unique constraint preventing multiple legitimate requests to the same astrologer.
 
 15. File
 File
@@ -403,6 +426,10 @@ KUNDALI
 VOICE_NOTE
 
 This allows a consultation to have multiple files.
+
+API returns file metadata only to authorized customer/assigned astrologer.
+Do not expose public URLs or unnecessary storage keys in responses.
+R2 signed URL generation belongs behind the files storage abstraction (later).
 
 17. AppointmentProposal
 AppointmentProposal

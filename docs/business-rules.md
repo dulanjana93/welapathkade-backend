@@ -166,11 +166,33 @@ preferred times
 
 Payment is NOT required at request submission.
 
+Preferred time semantics (Phase 4):
+
+- `preferredStartAt` is the customer's preferred start (UTC in DB; Asia/Colombo in the UI).
+- It is **not** an appointment time and must not be named `appointmentStartAt`.
+- An optional `preferredEndAt` is preference-only and does **not** fix the final consultation duration.
+- The astrologer chooses duration later when proposing an appointment (Phase 5).
+- Submitting a request does **not** reserve a slot, create an appointment, or trigger payment.
+- Availability is revalidated at submit time (eligibility only). The slot may become unavailable before the astrologer responds.
+
+Service / price snapshot:
+
+- At create time the platform snapshots `requestedPrice`, `serviceNameSi`, and `serviceNameEn`.
+- Later catalog/price changes must not rewrite historical request display amounts.
+
+Consultation files:
+
+- Kundali / voice notes belong to the request (private File + ConsultationFile metadata).
+- Binary objects are not stored in MySQL; R2 signed URLs come later.
+- Never return public URLs for consultation files.
+
 7. Astrologer Response SLA
 
 Astrologer response deadline:
 
 12 hours
+
+from `submittedAt` (`expiresAt = submittedAt + 12h`).
 
 Allowed responses:
 
@@ -182,6 +204,27 @@ If the astrologer does not respond:
 EXPIRED
 
 Viewing the request does not reset or stop the timer.
+
+`viewedAt`:
+
+- Set once when the assigned astrologer first opens a PENDING request.
+- Must not overwrite the original first-view timestamp.
+- Must not modify `expiresAt`.
+
+Acceptance semantics:
+
+- ACCEPT means the astrologer is willing to proceed with the request.
+- It does **not** create an appointment, payment, reservation, or payout.
+
+Customer cancellation:
+
+- Allowed only while PENDING → CANCELLED.
+- No refund logic (no payment yet).
+
+Expiration implementation:
+
+- Prefer BullMQ worker when available.
+- Until then, services must treat overdue PENDING rows as EXPIRED on read/action (idempotent conditional update).
 
 8. Appointment Proposal
 

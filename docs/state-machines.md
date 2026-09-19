@@ -12,30 +12,43 @@ Initial state:
 
 ```text
 PENDING
+```
 
 State machine:
 
+```text
 PENDING
  ├── ACCEPT   → ACCEPTED
  ├── DECLINE  → DECLINED
  ├── TIMEOUT  → EXPIRED
  └── CUSTOMER_CANCEL → CANCELLED
+```
 
 Rules:
 
-ACCEPT is only allowed while PENDING.
-DECLINE is only allowed while PENDING.
-Timeout is only allowed while PENDING and expiresAt <= now.
-Customer cancellation is only allowed while PENDING.
-viewedAt does not affect expiry.
+- ACCEPT is only allowed while PENDING and `expiresAt > now`.
+- DECLINE is only allowed while PENDING and `expiresAt > now`.
+- Timeout is only allowed while PENDING and `expiresAt <= now`.
+- Customer cancellation is only allowed while PENDING.
+- `viewedAt` does not affect expiry.
+- If accept/decline is attempted after expiry, transition PENDING → EXPIRED (idempotent) and reject the action.
+- Once ACCEPTED, DECLINED, EXPIRED, or CANCELLED, the request cannot return to PENDING or be accepted/declined again.
 
-Terminal states:
+Terminal states (request lifecycle):
 
+```text
 DECLINED
 EXPIRED
 CANCELLED
+```
 
-ACCEPTED is not terminal because appointment scheduling follows.
+ACCEPTED is not terminal for the overall consultation journey because appointment scheduling follows (Phase 5), but it is terminal for Phase 4 request actions (accept/decline/cancel).
+
+Authorization:
+
+- PUBLIC: create; list/view own; cancel own PENDING.
+- ASTROLOGER: list/view assigned; accept/decline assigned PENDING.
+- Every query is ownership-scoped (never trust client IDs alone).
 
 2. Appointment Proposal
 

@@ -28,6 +28,7 @@ import {
   UpdateAvailabilityExceptionDto,
   WeeklyWindowInputDto,
 } from './dto/availability.dto';
+import { DateTime } from 'luxon';
 import {
   DAY_KEYS,
   assertNoOverlaps,
@@ -276,7 +277,7 @@ export class AvailabilityService {
       durationMinutes: duration,
       weekly,
       exceptions,
-      occupied: [], // Phase 4+ injects appointments/reservations
+      occupied: [], // Phase 5+ injects appointments/reservations
     });
 
     return {
@@ -292,6 +293,77 @@ export class AvailabilityService {
         endTime: s.endTime,
       })),
     };
+  }
+
+  /**
+   * Eligibility check only: preferred time must currently fall on a public slot.
+   * Does NOT reserve the slot or create an appointment.
+   */
+  async assertPreferredSlotEligible(params: {
+    astrologerId: string;
+    preferredStartAt: Date;
+    preferredEndAt?: Date | null;
+    now?: Date;
+  }): Promise<void> {
+    const profile = await this.requirePublicBookable(params.astrologerId);
+    const now = params.now ?? new Date();
+    const start = params.preferredStartAt;
+    const end = params.preferredEndAt ?? null;
+
+    if (Number.isNaN(start.getTime())) {
+      throw new BadRequestException('preferredStartAt is invalid');
+    }
+    if (end && Number.isNaN(end.getTime())) {
+      throw new BadRequestException('preferredEndAt is invalid');
+    }
+    if (end && end <= start) {
+      throw new BadRequestException('preferredEndAt must be after preferredStartAt');
+    }
+
+    const durationMinutes = end
+      ? Math.round((end.getTime() - start.getTime()) / 60_000)
+      : 30;
+    if (durationMinutes < 15 || durationMinutes > 240) {
+      throw new BadRequestException(
+        'Preferred window duration must be between 15 and 240 minutes',
+      );
+    }
+
+    const localStart = DateTime.fromJSDate(start, { zone: 'utc' }).setZone(
+      BUSINESS_TIMEZONE,
+    );
+    if (!localStart.isValid) {
+      throw new BadRequestException('preferredStartAt is invalid');
+    }
+    const dateIso = localStart.toISODate()!;
+
+    const [weekly, exceptions] = await Promise.all([
+      this.prisma.weeklyAvailability.findMany({
+        where: { astrologerId: profile.id },
+      }),
+      this.prisma.availabilityException.findMany({
+        where: { astrologerId: profile.id },
+      }),
+    ]);
+
+    const slots = this.calculator.enumerateSlots({
+      fromDateIso: dateIso,
+      toDateIso: dateIso,
+      durationMinutes,
+      weekly,
+      exceptions,
+      occupied: [],
+      now,
+    });
+
+    const matched = slots.some(
+      (s) => Math.abs(s.startAt.getTime() - start.getTime()) < 1000,
+    );
+    if (!matched) {
+      throw new BadRequestException(
+        'Preferred time is outside the astrologer availability or booking horizon',
+      );
+    }
   }
 
   private async requirePublicBookable(astrologerId: string) {

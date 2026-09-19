@@ -1,4 +1,12 @@
-import { Body, Controller, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Patch,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -18,6 +26,14 @@ import { ServicesService } from '../services/services.service';
 @Controller('admin/services')
 export class AdminServicesController {
   constructor(private readonly servicesService: ServicesService) {}
+
+  @Get()
+  @ApiOperation({
+    summary: 'List all platform services including inactive (admin)',
+  })
+  list() {
+    return this.servicesService.listAllAdmin();
+  }
 
   @Post()
   @ApiOperation({ summary: 'Create a platform service (admin)' })

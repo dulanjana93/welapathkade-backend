@@ -26,6 +26,15 @@ export class ServicesService {
       .then((rows) => rows.map(toPublicServiceView));
   }
 
+  /** Admin catalog: ACTIVE + INACTIVE (soft-deactivated) services. */
+  listAllAdmin() {
+    return this.prisma.service
+      .findMany({
+        orderBy: { nameEn: 'asc' },
+      })
+      .then((rows) => rows.map(toAdminServiceView));
+  }
+
   async getActivePublicById(id: string) {
     const service = await this.prisma.service.findFirst({
       where: { id, status: ServiceStatus.ACTIVE },
