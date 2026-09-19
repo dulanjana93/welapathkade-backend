@@ -167,10 +167,12 @@ availability
 
 Responsible for:
 
-weekly availability
-exceptions
-custom availability
+weekly availability (Asia/Colombo local HH:mm + weekday)
+availability exceptions (UNAVAILABLE / AVAILABLE_OVERRIDE)
 availability validation
+public ACTIVE-astrologer availability reads
+available-slot calculation (lead time, horizon, occupied-interval injection)
+AstrologerBookingGuard row-lock helper for later appointment writes
 consultations
 
 Responsible for:
@@ -186,7 +188,7 @@ Responsible for:
 appointment proposals
 appointment reservations
 appointment lifecycle
-booking guard
+booking conflict checks (uses AvailabilityCalculator + BookingGuardService)
 overlap detection
 payments
 
@@ -559,11 +561,19 @@ Avoid making SMS or push calls inside critical database transactions.
 
 Business timezone:
 
-Asia/Colombo
+Asia/Colombo (fixed for V1 — clients must not supply alternate timezones)
 
-Persist timestamps in UTC.
+Persist event timestamps in UTC.
 
-Convert to Asia/Colombo at presentation/business-boundary level.
+Weekly availability is **not** a UTC timestamp: store recurring local clock time + weekday.
+
+Conversion rule for slot calculation:
+
+1. Resolve Asia/Colombo calendar date + weekday.
+2. Apply exceptions for that date.
+3. Convert each local HH:mm window to UTC via luxon (`Asia/Colombo` → UTC).
+4. Apply min lead time (1 hour) and max horizon (30 days) in absolute time.
+5. Subtract occupied intervals after expanding them by the 10-minute scheduling buffer.
 
 Appointment comparisons must use absolute timestamps.
 

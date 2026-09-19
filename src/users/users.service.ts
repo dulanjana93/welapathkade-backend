@@ -190,6 +190,7 @@ export class UsersService {
               userId: user.id,
               displayName,
               status: AstrologerProfileStatus.INACTIVE,
+              bookingGuard: { create: {} },
             },
           });
 

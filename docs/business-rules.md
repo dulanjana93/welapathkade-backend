@@ -46,7 +46,7 @@ create/update profile during onboarding
 select services
 set service prices
 submit an application for admin review
-define availability (later phase)
+define availability (weekly windows + date exceptions; Asia/Colombo)
 receive consultation requests
 accept/decline requests
 propose appointment times
@@ -249,6 +249,25 @@ create duplicate ledger transactions
 create duplicate referral commissions
 12. Appointment Availability
 
+Business timezone:
+
+Asia/Colombo
+
+Weekly availability stores recurring local clock times (HH:mm) and weekday — not UTC timestamps.
+
+Example:
+
+Monday 09:00–12:00 Asia/Colombo
+
+is stored as weekday=MONDAY, startTime="09:00", endTime="12:00".
+
+When computing bookable slots, convert that local window to absolute UTC timestamps.
+
+Date exceptions use Asia/Colombo calendar dates and override the weekly schedule for that date:
+
+- UNAVAILABLE — no bookable windows that day
+- AVAILABLE_OVERRIDE — replace weekly windows with the exception window(s)
+
 Minimum lead time:
 
 1 hour
@@ -265,9 +284,13 @@ Buffer:
 
 10 minutes
 
-The buffer applies to scheduling availability.
+The buffer applies in the scheduling/conflict layer around occupied appointments/reservations.
+
+It does **not** shrink the astrologer's displayed willingness windows.
 
 It does not change the appointment's billed duration.
+
+Onboarding readiness requires at least one weekly availability window before application submit or admin approval.
 
 13. Double Booking
 

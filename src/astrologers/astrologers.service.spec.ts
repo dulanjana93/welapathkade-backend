@@ -46,11 +46,25 @@ describe('AstrologersService', () => {
     status: UserStatus.ACTIVE,
   } as never;
 
+  const availabilityService = {
+    hasConfiguredAvailability: jest.fn().mockResolvedValue(true),
+    getScheduleForAstrologer: jest.fn().mockResolvedValue({
+      timezone: 'Asia/Colombo',
+      weekly: {},
+      exceptions: [],
+    }),
+  };
+
   let service: AstrologersService;
 
   beforeEach(() => {
     jest.resetAllMocks();
-    service = new AstrologersService(prisma as never);
+    availabilityService.hasConfiguredAvailability.mockResolvedValue(true);
+    service = new AstrologersService(
+      prisma as never,
+      { write: jest.fn() } as never,
+      availabilityService as never,
+    );
   });
 
   it('forbids non-astrologers from managing profile', async () => {

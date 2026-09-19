@@ -16,6 +16,7 @@ import {
   UserStatus,
 } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
+import { AvailabilityService } from '../availability/availability.service';
 import {
   isPriceWithinRange,
   toDecimal,
@@ -41,6 +42,7 @@ export class AstrologersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
+    private readonly availabilityService: AvailabilityService,
   ) {}
 
   assertAstrologerRole(user: User): void {
@@ -96,6 +98,7 @@ export class AstrologersService {
             status: AstrologerApplicationStatus.DRAFT,
           },
         },
+        bookingGuard: { create: {} },
       },
     });
 
@@ -426,7 +429,13 @@ export class AstrologersService {
         },
       }));
 
-    const readiness = this.evaluateOnboardingReadiness(profile, profile.services);
+    const availabilityReady =
+      await this.availabilityService.hasConfiguredAvailability(profile.id);
+    const readiness = this.evaluateOnboardingReadiness(
+      profile,
+      profile.services,
+      availabilityReady,
+    );
 
     return {
       profile: toOwnProfileView(profile, {
@@ -488,7 +497,13 @@ export class AstrologersService {
       );
     }
 
-    const readiness = this.evaluateOnboardingReadiness(profile, profile.services);
+    const availabilityReady =
+      await this.availabilityService.hasConfiguredAvailability(profile.id);
+    const readiness = this.evaluateOnboardingReadiness(
+      profile,
+      profile.services,
+      availabilityReady,
+    );
     if (!readiness.canSubmit) {
       throw new BadRequestException({
         message: 'Onboarding is incomplete',
@@ -549,7 +564,12 @@ export class AstrologersService {
     if (!profile) {
       throw new NotFoundException('Astrologer profile not found');
     }
-    return this.toAdminAstrologerView(profile);
+    const availability =
+      await this.availabilityService.getScheduleForAstrologer(profile.id);
+    return {
+      ...this.toAdminAstrologerView(profile),
+      availability,
+    };
   }
 
   async adminReviewApplication(
@@ -592,9 +612,12 @@ export class AstrologersService {
       };
 
       if (dto.action === 'APPROVE') {
+        const availabilityReady =
+          await this.availabilityService.hasConfiguredAvailability(profile.id);
         const readiness = this.evaluateOnboardingReadiness(
           profile,
           profile.services,
+          availabilityReady,
         );
         if (!readiness.canSubmit) {
           throw new BadRequestException({
@@ -674,6 +697,7 @@ export class AstrologersService {
       status: AstrologerServiceStatus;
       service: { status: ServiceStatus; minPrice: Prisma.Decimal; maxPrice: Prisma.Decimal };
     }>,
+    availabilityReady: boolean,
   ) {
     const errors: string[] = [];
     if (profile.displayName.trim().length < 2) {
@@ -702,12 +726,15 @@ export class AstrologersService {
       }
     }
 
+    if (!availabilityReady) {
+      errors.push('weekly availability is required');
+    }
+
     return {
       canSubmit: errors.length === 0,
       errors,
-      // Availability readiness is deferred to the availability phase.
-      availabilityRequired: false,
-      availabilityReady: null as boolean | null,
+      availabilityRequired: true,
+      availabilityReady,
     };
   }
 

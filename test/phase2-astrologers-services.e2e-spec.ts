@@ -54,6 +54,9 @@ describe('Phase 2 Astrologers + Services (e2e)', () => {
 
   beforeEach(async () => {
     await prisma.auditLog.deleteMany();
+    await prisma.availabilityException.deleteMany();
+    await prisma.weeklyAvailability.deleteMany();
+    await prisma.astrologerBookingGuard.deleteMany();
     await prisma.astrologerApplication.deleteMany();
     await prisma.astrologerService.deleteMany();
     await prisma.astrologerProfile.deleteMany();

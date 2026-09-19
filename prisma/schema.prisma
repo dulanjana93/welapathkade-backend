@@ -1,4 +1,4 @@
-// Welapathkade Phase 1–2.5 (Auth, Astrologers/Services, Role registration)
+// Welapathkade Phase 1–3 (Auth, Astrologers/Services, Onboarding, Availability)
 
 generator client {
   provider = "prisma-client-js"
@@ -71,6 +71,22 @@ enum AstrologerServiceStatus {
   INACTIVE
 }
 
+/// Local Asia/Colombo weekday for recurring weekly availability.
+enum DayOfWeek {
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+  SUNDAY
+}
+
+enum AvailabilityExceptionType {
+  UNAVAILABLE
+  AVAILABLE_OVERRIDE
+}
+
 model User {
   id               String     @id @default(cuid())
   phone            String     @unique
@@ -86,12 +102,12 @@ model User {
   referredBy  User?  @relation("UserReferrals", fields: [referredByUserId], references: [id])
   referrals   User[] @relation("UserReferrals")
 
-  sessions                 UserSession[]
-  devices                  UserDevice[]
-  otpVerifications         OtpVerification[]
-  astrologerProfile        AstrologerProfile?
-  auditLogs                AuditLog[]                 @relation("AuditLogAdmin")
-  reviewedApplications     AstrologerApplication[]    @relation("ApplicationReviewer")
+  sessions             UserSession[]
+  devices              UserDevice[]
+  otpVerifications     OtpVerification[]
+  astrologerProfile    AstrologerProfile?
+  auditLogs            AuditLog[]              @relation("AuditLogAdmin")
+  reviewedApplications AstrologerApplication[] @relation("ApplicationReviewer")
 
   @@index([referredByUserId])
 }
@@ -161,9 +177,12 @@ model AstrologerProfile {
   createdAt       DateTime                @default(now())
   updatedAt       DateTime                @updatedAt
 
-  user        User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  services    AstrologerService[]
-  application AstrologerApplication?
+  user                   User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  services               AstrologerService[]
+  application            AstrologerApplication?
+  weeklyAvailability     WeeklyAvailability[]
+  availabilityExceptions AvailabilityException[]
+  bookingGuard           AstrologerBookingGuard?
 
   @@index([status])
   @@index([city])
@@ -171,15 +190,15 @@ model AstrologerProfile {
 }
 
 model AstrologerApplication {
-  id                  String                       @id @default(cuid())
-  astrologerProfileId String                       @unique
-  status              AstrologerApplicationStatus  @default(DRAFT)
-  rejectionReason     String?                      @db.Text
+  id                  String                      @id @default(cuid())
+  astrologerProfileId String                      @unique
+  status              AstrologerApplicationStatus @default(DRAFT)
+  rejectionReason     String?                     @db.Text
   submittedAt         DateTime?
   reviewedAt          DateTime?
   reviewedByAdminId   String?
-  createdAt           DateTime                     @default(now())
-  updatedAt           DateTime                     @updatedAt
+  createdAt           DateTime                    @default(now())
+  updatedAt           DateTime                    @updatedAt
 
   profile    AstrologerProfile @relation(fields: [astrologerProfileId], references: [id], onDelete: Cascade)
   reviewedBy User?             @relation("ApplicationReviewer", fields: [reviewedByAdminId], references: [id], onDelete: SetNull)
@@ -223,6 +242,54 @@ model AstrologerService {
   @@index([serviceId])
   @@index([status])
   @@index([price])
+}
+
+/// Recurring local Asia/Colombo weekly window (not a UTC timestamp).
+model WeeklyAvailability {
+  id           String    @id @default(cuid())
+  astrologerId String
+  dayOfWeek    DayOfWeek
+  /// Local clock time HH:mm in Asia/Colombo
+  startTime    String    @db.VarChar(5)
+  /// Local clock time HH:mm in Asia/Colombo
+  endTime      String    @db.VarChar(5)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  astrologer AstrologerProfile @relation(fields: [astrologerId], references: [id], onDelete: Cascade)
+
+  @@index([astrologerId])
+  @@index([astrologerId, dayOfWeek])
+}
+
+/// Date-specific override of weekly availability (Asia/Colombo calendar date).
+model AvailabilityException {
+  id           String                    @id @default(cuid())
+  astrologerId String
+  /// Calendar date in Asia/Colombo (stored as DATE, no time component)
+  date         DateTime                  @db.Date
+  type         AvailabilityExceptionType
+  /// Required for AVAILABLE_OVERRIDE (local HH:mm)
+  startTime    String?                   @db.VarChar(5)
+  /// Required for AVAILABLE_OVERRIDE (local HH:mm)
+  endTime      String?                   @db.VarChar(5)
+  reason       String?                   @db.VarChar(500)
+  createdAt    DateTime                  @default(now())
+  updatedAt    DateTime                  @updatedAt
+
+  astrologer AstrologerProfile @relation(fields: [astrologerId], references: [id], onDelete: Cascade)
+
+  @@index([astrologerId])
+  @@index([astrologerId, date])
+}
+
+/// Sync primitive for future appointment reservations (SELECT … FOR UPDATE).
+model AstrologerBookingGuard {
+  astrologerId String   @id
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  astrologer AstrologerProfile @relation(fields: [astrologerId], references: [id], onDelete: Cascade)
 }
 
 model AuditLog {

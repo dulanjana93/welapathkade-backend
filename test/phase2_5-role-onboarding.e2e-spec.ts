@@ -50,6 +50,9 @@ describe('Phase 2.5 Role registration & onboarding (e2e)', () => {
 
   beforeEach(async () => {
     await prisma.auditLog.deleteMany();
+    await prisma.availabilityException.deleteMany();
+    await prisma.weeklyAvailability.deleteMany();
+    await prisma.astrologerBookingGuard.deleteMany();
     await prisma.astrologerApplication.deleteMany();
     await prisma.astrologerService.deleteMany();
     await prisma.astrologerProfile.deleteMany();
@@ -257,6 +260,35 @@ describe('Phase 2.5 Role registration & onboarding (e2e)', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({ serviceId: service.body.id, price: 1500 })
       .expect(201);
+
+    const incomplete = await request(app.getHttpServer())
+      .get('/astrologers/me/onboarding')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+    expect(incomplete.body.readiness.availabilityReady).toBe(false);
+    expect(incomplete.body.readiness.canSubmit).toBe(false);
+
+    await request(app.getHttpServer())
+      .post('/astrologers/me/application/submit')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(400);
+
+    await request(app.getHttpServer())
+      .put('/astrologers/me/availability')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        monday: [
+          { startTime: '09:00', endTime: '12:00' },
+          { startTime: '14:00', endTime: '18:00' },
+        ],
+        tuesday: [{ startTime: '10:00', endTime: '17:00' }],
+        wednesday: [{ startTime: '09:00', endTime: '17:00' }],
+        thursday: [{ startTime: '09:00', endTime: '17:00' }],
+        friday: [{ startTime: '09:00', endTime: '17:00' }],
+        saturday: [{ startTime: '09:00', endTime: '13:00' }],
+        sunday: [],
+      })
+      .expect(200);
 
     const submitted = await request(app.getHttpServer())
       .post('/astrologers/me/application/submit')

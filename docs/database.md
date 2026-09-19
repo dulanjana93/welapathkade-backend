@@ -249,10 +249,9 @@ WeeklyAvailability
 
 id
 astrologerId
-dayOfWeek
-startTime
-endTime
-isActive
+dayOfWeek (MONDAY…SUNDAY)
+startTime (local HH:mm Asia/Colombo)
+endTime (local HH:mm Asia/Colombo)
 createdAt
 updatedAt
 
@@ -264,12 +263,18 @@ Monday
 
 Multiple windows per day are allowed.
 
+Constraints (enforced in application layer):
+
+- startTime < endTime
+- no overlapping windows for the same astrologer + day
+- times are local Asia/Colombo clock values, not UTC
+
 12. AvailabilityException
 AvailabilityException
 
 id
 astrologerId
-date
+date (Asia/Colombo calendar DATE)
 type
 startTime NULL
 endTime NULL
@@ -279,8 +284,14 @@ updatedAt
 
 Type:
 
-AVAILABLE
 UNAVAILABLE
+AVAILABLE_OVERRIDE
+
+Rules:
+
+- UNAVAILABLE clears the date (no start/end)
+- AVAILABLE_OVERRIDE replaces weekly windows for that date (requires start/end)
+- exceptions must not conflict ambiguously on the same date
 
 Used for date-specific changes to weekly availability.
 
@@ -297,11 +308,13 @@ This is a synchronization primitive.
 
 It is NOT business data.
 
+Created when an astrologer profile is created (and backfilled by migration).
+
 Used with:
 
-SELECT astrologer_id
-FROM astrologer_booking_guards
-WHERE astrologer_id = ?
+SELECT astrologerId
+FROM AstrologerBookingGuard
+WHERE astrologerId = ?
 FOR UPDATE;
 14. Consultation
 Consultation

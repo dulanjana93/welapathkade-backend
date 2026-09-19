@@ -332,6 +332,16 @@ Approval also sets AstrologerProfile.status = ACTIVE.
 Rejection keeps AstrologerProfile.status = INACTIVE.
 Admin operational suspension uses AstrologerProfile.status and is separate from application review.
 
+Submit (DRAFT/REJECTED → PENDING_REVIEW) and admin APPROVE both require onboarding readiness:
+
+- required profile fields
+- at least one active priced service within catalog bounds
+- at least one weekly availability window
+
+Failed APPROVE must leave application status unchanged (still PENDING_REVIEW).
+
+Existing PENDING_REVIEW / APPROVED applications are not automatically moved backwards when availability rules are enforced; validation applies at transition time.
+
 13. User Status
 
 Possible:

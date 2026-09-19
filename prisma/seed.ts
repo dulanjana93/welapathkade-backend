@@ -8,6 +8,7 @@ import {
   AstrologerApplicationStatus,
   AstrologerProfileStatus,
   AstrologerServiceStatus,
+  DayOfWeek,
   PrismaClient,
   ServiceStatus,
   UserRole,
@@ -172,6 +173,35 @@ async function ensureDevAstrologer(serviceIds: string[]) {
     }
   }
 
+  await prisma.astrologerBookingGuard.upsert({
+    where: { astrologerId: profile.id },
+    create: { astrologerId: profile.id },
+    update: {},
+  });
+
+  const weeklyCount = await prisma.weeklyAvailability.count({
+    where: { astrologerId: profile.id },
+  });
+  if (weeklyCount === 0) {
+    const windows: Array<{ dayOfWeek: DayOfWeek; startTime: string; endTime: string }> = [
+      { dayOfWeek: DayOfWeek.MONDAY, startTime: '09:00', endTime: '12:00' },
+      { dayOfWeek: DayOfWeek.MONDAY, startTime: '14:00', endTime: '18:00' },
+      { dayOfWeek: DayOfWeek.TUESDAY, startTime: '10:00', endTime: '17:00' },
+      { dayOfWeek: DayOfWeek.WEDNESDAY, startTime: '09:00', endTime: '17:00' },
+      { dayOfWeek: DayOfWeek.THURSDAY, startTime: '09:00', endTime: '17:00' },
+      { dayOfWeek: DayOfWeek.FRIDAY, startTime: '09:00', endTime: '17:00' },
+      { dayOfWeek: DayOfWeek.SATURDAY, startTime: '09:00', endTime: '13:00' },
+    ];
+    await prisma.weeklyAvailability.createMany({
+      data: windows.map((w) => ({
+        astrologerId: profile.id,
+        dayOfWeek: w.dayOfWeek,
+        startTime: w.startTime,
+        endTime: w.endTime,
+      })),
+    });
+  }
+
   return { userId: user.id, profileId: profile.id, phone };
 }
 
@@ -187,7 +217,7 @@ async function main() {
   console.log(
     JSON.stringify(
       {
-        message: 'Phase 2.5 seed complete',
+        message: 'Phase 3 seed complete',
         services: SERVICES.map((s) => s.code),
         devAstrologer: astrologer,
       },
