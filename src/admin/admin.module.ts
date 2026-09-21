@@ -5,6 +5,7 @@ import { AdminAuthController } from './admin-auth.controller';
 import { AdminAuthService } from './admin-auth.service';
 import { AdminServicesController } from './admin-services.controller';
 import { AdminAstrologersController } from './admin-astrologers.controller';
+import { AdminUsersController } from './admin-users.controller';
 import { AstrologersModule } from '../astrologers/astrologers.module';
 import { ServicesModule } from '../services/services.module';
 
@@ -12,6 +13,7 @@ import { ServicesModule } from '../services/services.module';
   imports: [AuthModule, UsersModule, ServicesModule, AstrologersModule],
   controllers: [
     AdminAuthController,
+    AdminUsersController,
     AdminServicesController,
     AdminAstrologersController,
   ],

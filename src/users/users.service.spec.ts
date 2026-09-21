@@ -9,7 +9,7 @@ describe('UsersService referral rules', () => {
     },
   };
 
-  const service = new UsersService(prisma as never);
+  const service = new UsersService(prisma as never, { record: jest.fn() } as never);
 
   it('rejects invalid referral codes', async () => {
     prisma.user.findUnique.mockResolvedValue(null);

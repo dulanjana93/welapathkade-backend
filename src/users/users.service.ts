@@ -12,6 +12,7 @@ import {
   UserRole,
   UserStatus,
 } from '@prisma/client';
+import { AuditService } from '../audit/audit.service';
 import { generateReferralCode } from '../common/crypto/hashing';
 import { hashPassword } from '../common/crypto/password';
 import { PrismaService } from '../prisma/prisma.service';
@@ -38,7 +39,10 @@ export type SelfAuthView = PublicUserView & {
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auditService: AuditService,
+  ) {}
 
   toPublicView(user: User): PublicUserView {
     return {
@@ -349,6 +353,111 @@ export class UsersService {
     }
 
     throw new BadRequestException('Unable to allocate referral code');
+  }
+
+  toAdminUserView(
+    user: User & {
+      astrologerProfile?: {
+        id: string;
+        status: AstrologerProfileStatus;
+        application?: { status: AstrologerApplicationStatus } | null;
+      } | null;
+    },
+  ) {
+    return {
+      id: user.id,
+      name: user.name,
+      phone: user.phone,
+      email: user.email,
+      role: user.role,
+      status: user.status,
+      language: user.language,
+      referralCode: user.referralCode,
+      referredByUserId: user.referredByUserId,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+      astrologerProfileId: user.astrologerProfile?.id ?? null,
+      profileStatus: user.astrologerProfile?.status ?? null,
+      applicationStatus: user.astrologerProfile?.application?.status ?? null,
+    };
+  }
+
+  async adminList(filters: { role?: UserRole; status?: UserStatus }) {
+    const users = await this.prisma.user.findMany({
+      where: {
+        ...(filters.role ? { role: filters.role } : {}),
+        ...(filters.status ? { status: filters.status } : {}),
+      },
+      include: {
+        astrologerProfile: {
+          include: { application: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return users.map((user) => this.toAdminUserView(user));
+  }
+
+  async adminGetById(id: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id },
+      include: {
+        astrologerProfile: {
+          include: { application: true },
+        },
+        referredBy: true,
+      },
+    });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    return {
+      ...this.toAdminUserView(user),
+      referredBy: user.referredBy
+        ? {
+            id: user.referredBy.id,
+            name: user.referredBy.name,
+            role: user.referredBy.role,
+            status: user.referredBy.status,
+          }
+        : null,
+    };
+  }
+
+  async adminUpdateStatus(params: {
+    id: string;
+    status: UserStatus;
+    actorAdminId: string;
+    ip?: string | null;
+  }) {
+    if (params.id === params.actorAdminId) {
+      throw new BadRequestException('You cannot change your own account status');
+    }
+
+    const existing = await this.getByIdOrThrow(params.id);
+    const updated = await this.prisma.user.update({
+      where: { id: params.id },
+      data: { status: params.status },
+      include: {
+        astrologerProfile: {
+          include: { application: true },
+        },
+      },
+    });
+
+    await this.auditService.record({
+      adminUserId: params.actorAdminId,
+      action: 'USER_STATUS_UPDATE',
+      entityType: 'User',
+      entityId: updated.id,
+      oldData: { status: existing.status },
+      newData: { status: updated.status },
+      ip: params.ip,
+    });
+
+    return this.toAdminUserView(updated);
   }
 
   assertCanAuthenticate(user: User): void {
