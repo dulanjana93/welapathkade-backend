@@ -17,11 +17,13 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { ConsultationProposalsService } from './consultation-proposals.service';
 import { ConsultationsService } from './consultations.service';
 import {
   DeclineConsultationDto,
   ListConsultationsQueryDto,
 } from './dto/consultation.dto';
+import { CreateConsultationProposalDto } from './dto/proposal.dto';
 
 @ApiTags('Astrologer Consultations')
 @ApiBearerAuth()
@@ -29,7 +31,10 @@ import {
 @Roles(UserRole.ASTROLOGER)
 @Controller('astrologers/me/consultations')
 export class AstrologerConsultationsController {
-  constructor(private readonly consultationsService: ConsultationsService) {}
+  constructor(
+    private readonly consultationsService: ConsultationsService,
+    private readonly proposalsService: ConsultationProposalsService,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: 'List incoming consultation requests for me' })
@@ -40,10 +45,38 @@ export class AstrologerConsultationsController {
     return this.consultationsService.listForAstrologer(user, query.status);
   }
 
+  @Post(':consultationId/proposals')
+  @ApiOperation({
+    summary:
+      'Propose appointment date/time + duration for an ACCEPTED consultation (no reservation/payment)',
+  })
+  createProposal(
+    @CurrentUser() user: User,
+    @Param('consultationId') consultationId: string,
+    @Body() dto: CreateConsultationProposalDto,
+  ) {
+    return this.proposalsService.createForAstrologer(
+      user,
+      consultationId,
+      dto,
+    );
+  }
+
+  @Get(':consultationId/proposals')
+  @ApiOperation({
+    summary: 'List proposal history for an assigned consultation (newest first)',
+  })
+  listProposals(
+    @CurrentUser() user: User,
+    @Param('consultationId') consultationId: string,
+  ) {
+    return this.proposalsService.listForAstrologer(user, consultationId);
+  }
+
   @Get(':id')
   @ApiOperation({
     summary:
-      'Get consultation detail (marks PENDING viewedAt once; does not extend expiresAt)',
+      'Get consultation detail including proposals (marks PENDING viewedAt once; does not extend expiresAt)',
   })
   getOne(@CurrentUser() user: User, @Param('id') id: string) {
     return this.consultationsService.getForAstrologer(user, id, true);

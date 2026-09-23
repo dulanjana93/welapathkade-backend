@@ -50,7 +50,10 @@ $ npm run start:prod
 # unit tests
 $ npm run test
 
-# e2e tests
+# one-time: create welapathkade_test + migrate (does NOT touch welapathkade)
+$ npm run test:e2e:setup
+
+# e2e tests (always uses isolated DB welapathkade_test — see docs/e2e-database.md)
 $ npm run test:e2e
 
 # test coverage

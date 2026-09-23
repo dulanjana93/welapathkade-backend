@@ -12,6 +12,7 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { RedisService } from '../src/redis/redis.service';
 import { AUTH_CONSTANTS } from '../src/common/auth/auth.constants';
 import { hashOtpCode } from '../src/common/crypto/hashing';
+import { resetE2eDatabase, resetE2eRedisOtps } from './e2e-cleanup';
 
 describe('Auth (e2e)', () => {
   let app: INestApplication<App>;
@@ -48,19 +49,8 @@ describe('Auth (e2e)', () => {
   });
 
   beforeEach(async () => {
-    await prisma.consultationFile.deleteMany();
-    await prisma.consultation.deleteMany();
-    await prisma.file.deleteMany();
-    await prisma.userSession.deleteMany();
-    await prisma.userDevice.deleteMany();
-    await prisma.otpVerification.deleteMany();
-    await prisma.user.deleteMany();
-
-    const client = redis.getClient();
-    const keys = await client.keys('otp:*');
-    if (keys.length > 0) {
-      await client.del(...keys);
-    }
+    await resetE2eDatabase(prisma);
+    await resetE2eRedisOtps(redis);
   });
 
   afterAll(async () => {

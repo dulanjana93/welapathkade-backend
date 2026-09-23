@@ -18,6 +18,8 @@ import { TokenService } from '../src/auth/token.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { RedisService } from '../src/redis/redis.service';
 import { UsersService } from '../src/users/users.service';
+import { assertTestDatabase } from '../src/common/database-safety/assert-test-database';
+import { resetE2eDatabase, resetE2eRedisOtps } from './e2e-cleanup';
 
 describe('Phase 3 Availability (e2e)', () => {
   let app: INestApplication<App>;
@@ -51,27 +53,8 @@ describe('Phase 3 Availability (e2e)', () => {
   });
 
   beforeEach(async () => {
-    await prisma.consultationFile.deleteMany();
-    await prisma.consultation.deleteMany();
-    await prisma.file.deleteMany();
-    await prisma.auditLog.deleteMany();
-    await prisma.availabilityException.deleteMany();
-    await prisma.weeklyAvailability.deleteMany();
-    await prisma.astrologerBookingGuard.deleteMany();
-    await prisma.astrologerApplication.deleteMany();
-    await prisma.astrologerService.deleteMany();
-    await prisma.astrologerProfile.deleteMany();
-    await prisma.service.deleteMany();
-    await prisma.userSession.deleteMany();
-    await prisma.userDevice.deleteMany();
-    await prisma.otpVerification.deleteMany();
-    await prisma.user.deleteMany();
-
-    const client = redis.getClient();
-    const keys = await client.keys('otp:*');
-    if (keys.length > 0) {
-      await client.del(...keys);
-    }
+    await resetE2eDatabase(prisma);
+    await resetE2eRedisOtps(redis);
   });
 
   afterAll(async () => {
@@ -93,6 +76,8 @@ describe('Phase 3 Availability (e2e)', () => {
 
   async function issueAdmin() {
     const admin = await usersService.createAdminUser({
+      email: 'admin-phase3@welapathkade.test',
+      password: 'AdminPass1!',
       phone: '+94773339999',
       name: 'Admin',
     });
@@ -283,6 +268,7 @@ describe('Phase 3 Availability (e2e)', () => {
     const fridayIso = friday.toISODate()!;
     const saturdayIso = saturday.toISODate()!;
 
+    assertTestDatabase();
     await prisma.availabilityException.deleteMany({
       where: { astrologerId: profile.id },
     });
@@ -431,6 +417,7 @@ describe('Phase 3 Availability (e2e)', () => {
     });
 
     // Simulate missing availability after submit (admin must still reject approve)
+    assertTestDatabase();
     await prisma.weeklyAvailability.deleteMany({
       where: { astrologerId: profile.id },
     });

@@ -20,6 +20,7 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { RedisService } from '../src/redis/redis.service';
 import { UsersService } from '../src/users/users.service';
 import { generateReferralCode } from '../src/common/crypto/hashing';
+import { resetE2eDatabase, resetE2eRedisOtps } from './e2e-cleanup';
 
 describe('Phase 2 Astrologers + Services (e2e)', () => {
   let app: INestApplication<App>;
@@ -53,27 +54,8 @@ describe('Phase 2 Astrologers + Services (e2e)', () => {
   });
 
   beforeEach(async () => {
-    await prisma.consultationFile.deleteMany();
-    await prisma.consultation.deleteMany();
-    await prisma.file.deleteMany();
-    await prisma.auditLog.deleteMany();
-    await prisma.availabilityException.deleteMany();
-    await prisma.weeklyAvailability.deleteMany();
-    await prisma.astrologerBookingGuard.deleteMany();
-    await prisma.astrologerApplication.deleteMany();
-    await prisma.astrologerService.deleteMany();
-    await prisma.astrologerProfile.deleteMany();
-    await prisma.service.deleteMany();
-    await prisma.userSession.deleteMany();
-    await prisma.userDevice.deleteMany();
-    await prisma.otpVerification.deleteMany();
-    await prisma.user.deleteMany();
-
-    const client = redis.getClient();
-    const keys = await client.keys('otp:*');
-    if (keys.length > 0) {
-      await client.del(...keys);
-    }
+    await resetE2eDatabase(prisma);
+    await resetE2eRedisOtps(redis);
   });
 
   afterAll(async () => {
@@ -100,6 +82,8 @@ describe('Phase 2 Astrologers + Services (e2e)', () => {
 
   async function createAdmin() {
     return usersService.createAdminUser({
+      email: 'admin-phase2@welapathkade.test',
+      password: 'AdminPass1!',
       phone: '+94771119999',
       name: 'Admin',
     });

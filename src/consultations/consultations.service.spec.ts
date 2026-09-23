@@ -36,9 +36,18 @@ describe('ConsultationsService', () => {
     assertPreferredSlotEligible: jest.fn(),
   };
 
+  const proposals = {
+    loadProposalSummary: jest.fn().mockResolvedValue({
+      proposals: [],
+      pendingProposal: null,
+      acceptedProposal: null,
+    }),
+  };
+
   const service = new ConsultationsService(
     prisma as never,
     availability as never,
+    proposals as never,
   );
 
   const publicUser = {

@@ -44,39 +44,92 @@ CANCELLED
 
 ACCEPTED is not terminal for the overall consultation journey because appointment scheduling follows (Phase 5), but it is terminal for Phase 4 request actions (accept/decline/cancel).
 
+**Meaning of Consultation ACCEPTED:** the assigned astrologer accepted the consultation *request* (willingness to proceed). It does **not** mean a time is booked, payment succeeded, or an appointment is confirmed.
+
 Authorization:
 
 - PUBLIC: create; list/view own; cancel own PENDING.
 - ASTROLOGER: list/view assigned; accept/decline assigned PENDING.
 - Every query is ownership-scoped (never trust client IDs alone).
 
-2. Appointment Proposal
+---
+
+# 2. Appointment Proposal (Phase 5A)
+
+Model: `ConsultationProposal`
+
+A proposal is **not** a booking, reservation, or payment. It is a concrete date/time + duration offered by the astrologer after the consultation request is ACCEPTED.
 
 Initial state:
 
+```text
 PENDING
+```
 
 State machine:
 
+```text
 PENDING
  ├── CUSTOMER_ACCEPT → ACCEPTED
  ├── CUSTOMER_REJECT → REJECTED
- ├── TIMEOUT         → EXPIRED
- └── CANCEL          → CANCELLED
+ └── SUPERSEDE       → SUPERSEDED
+```
 
-Only one PENDING proposal may exist for a consultation.
+Statuses:
 
-Historical proposals must not be deleted.
+```text
+PENDING     — awaiting customer response
+ACCEPTED    — customer accepted this proposed time (scheduling only)
+REJECTED    — customer rejected; astrologer may create another proposal
+SUPERSEDED  — another proposal on the same consultation was accepted
+```
+
+Rules:
+
+- Only the assigned ASTROLOGER may create a proposal.
+- Consultation must be `status = ACCEPTED`.
+- Only one `PENDING` proposal may exist per consultation at a time.
+- Creating a proposal while another is `PENDING` is rejected.
+- Creating a proposal after one is already `ACCEPTED` is rejected.
+- Historical proposals are never deleted.
+- Customer ACCEPT / REJECT only while proposal is `PENDING`.
+- On ACCEPT: proposal `PENDING → ACCEPTED`; any other `PENDING` proposals for the same consultation become `SUPERSEDED` atomically.
+- Only one proposal may ultimately be `ACCEPTED` per consultation.
+- Consultation.status remains `ACCEPTED` after proposal acceptance (not overloaded to “CONFIRMED”).
+- No payment, reservation row, PayHere, or confirmed appointment in Phase 5A.
+
+**Meaning of Proposal ACCEPTED:** the customer accepted the proposed appointment time. It does **not** mean payment has succeeded. Payment/reservation belongs to Phase 5B+.
+
+Scheduling validation (reuse AvailabilityService / AvailabilityCalculator):
+
+- At least 1 hour lead time from now.
+- At most 30 days into the future.
+- Start and end must fit inside the same valid availability interval.
+- Respect weekly windows (Asia/Colombo clock) and exceptions.
+- Duration is chosen by the astrologer (15–240 minutes — same bounds as slot enumeration).
+- `proposedEndAt` is derived server-side: `proposedStartAt + durationMinutes`.
+- Database stores UTC; weekly availability uses Colombo local time.
+
+Authorization:
+
+- ASTROLOGER: create/list proposals for assigned consultations.
+- PUBLIC customer: list/accept/reject proposals for own consultations.
 
 Terminal states:
 
+```text
 ACCEPTED
 REJECTED
-EXPIRED
-CANCELLED
-3. Appointment
+SUPERSEDED
+```
 
-Initial state after customer accepts proposal:
+Note (Phase 5A scope): proposal `EXPIRED` / `CANCELLED` transitions from the long-term product docs are **not** implemented in Phase 5A. `SUPERSEDED` covers the concurrent-accept safety case.
+
+---
+
+# 3. Appointment
+
+Initial state after customer accepts proposal (Phase 5B+ — not implemented in 5A):
 
 PAYMENT_PENDING
 
@@ -401,6 +454,8 @@ Never expire an already accepted/declined/cancelled request.
 
 16. Proposal Expiry
 
+Long-term product rule (Phase 5B+ / workers — **not implemented in Phase 5A**):
+
 When:
 
 expiresAt <= now
@@ -413,7 +468,9 @@ transition:
 
 PENDING → EXPIRED
 
-Do not expire a proposal after it has already been accepted/rejected/cancelled.
+Do not expire a proposal after it has already been accepted/rejected/superseded.
+
+Phase 5A proposal statuses are PENDING / ACCEPTED / REJECTED / SUPERSEDED only (no EXPIRED/CANCELLED yet).
 
 17. Idempotency Rule
 

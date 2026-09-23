@@ -1,4 +1,4 @@
-// Welapathkade Phase 1–4 (Auth … Availability + Consultation Requests)
+// Welapathkade Phase 1–5A (Auth … Availability + Consultation Requests + Proposals)
 
 generator client {
   provider = "prisma-client-js"
@@ -93,6 +93,14 @@ enum ConsultationStatus {
   DECLINED
   EXPIRED
   CANCELLED
+}
+
+/// Appointment time proposal (not a booking / reservation / payment).
+enum ProposalStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  SUPERSEDED
 }
 
 enum FileProvider {
@@ -356,6 +364,7 @@ model Consultation {
   astrologerService AstrologerService @relation(fields: [astrologerServiceId], references: [id], onDelete: Restrict)
   service          Service           @relation(fields: [serviceId], references: [id], onDelete: Restrict)
   files            ConsultationFile[]
+  proposals        ConsultationProposal[]
 
   @@index([customerId])
   @@index([astrologerId])
@@ -365,6 +374,29 @@ model Consultation {
   @@index([astrologerId, status, submittedAt])
   @@index([customerId, status, submittedAt])
   @@index([status, expiresAt])
+}
+
+/// Astrologer-proposed appointment time for an ACCEPTED consultation.
+/// Not a reservation, payment, or confirmed appointment (Phase 5B+).
+model ConsultationProposal {
+  id               String         @id @default(cuid())
+  consultationId   String
+  /// Proposed start instant (UTC). Validated against Asia/Colombo availability.
+  proposedStartAt  DateTime
+  /// Derived: proposedStartAt + durationMinutes (UTC).
+  proposedEndAt    DateTime
+  durationMinutes  Int
+  status           ProposalStatus @default(PENDING)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  respondedAt      DateTime?
+
+  consultation Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+
+  @@index([consultationId])
+  @@index([consultationId, status])
+  @@index([status])
+  @@index([proposedStartAt])
 }
 
 /// Private object metadata only — bytes live in R2 (integration later).

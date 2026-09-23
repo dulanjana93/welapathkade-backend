@@ -11,6 +11,7 @@ import {
 import { toMoneyString, type MoneyString } from '../common/money/money';
 import { BUSINESS_TIMEZONE } from '../availability/availability.constants';
 import { DateTime } from 'luxon';
+import type { ProposalView } from './proposal.mapper';
 
 export type ConsultationFileMetaView = {
   id: string;
@@ -76,6 +77,10 @@ export type ConsultationDetailView = ConsultationListItemView & {
   declineReason: string | null;
   files: ReturnType<typeof toFileMeta>[];
   astrologerServiceId: string;
+  /** Proposal history newest-first (Phase 5A). Empty until proposals exist. */
+  proposals: ProposalView[];
+  pendingProposal: ProposalView | null;
+  acceptedProposal: ProposalView | null;
 };
 
 type ConsultationWithRelations = Consultation & {
@@ -126,22 +131,38 @@ export function toAstrologerListItem(
 
 export function toCustomerDetail(
   c: ConsultationWithRelations,
+  proposalSummary?: {
+    proposals: ProposalView[];
+    pendingProposal: ProposalView | null;
+    acceptedProposal: ProposalView | null;
+  },
 ): ConsultationDetailView {
   return {
     ...toCustomerListItem(c),
     declineReason: c.declineReason,
     files: (c.files ?? []).map(toFileMeta),
     astrologerServiceId: c.astrologerServiceId,
+    proposals: proposalSummary?.proposals ?? [],
+    pendingProposal: proposalSummary?.pendingProposal ?? null,
+    acceptedProposal: proposalSummary?.acceptedProposal ?? null,
   };
 }
 
 export function toAstrologerDetail(
   c: ConsultationWithRelations,
+  proposalSummary?: {
+    proposals: ProposalView[];
+    pendingProposal: ProposalView | null;
+    acceptedProposal: ProposalView | null;
+  },
 ): ConsultationDetailView {
   return {
     ...toAstrologerListItem(c),
     declineReason: c.declineReason,
     files: (c.files ?? []).map(toFileMeta),
     astrologerServiceId: c.astrologerServiceId,
+    proposals: proposalSummary?.proposals ?? [],
+    pendingProposal: proposalSummary?.pendingProposal ?? null,
+    acceptedProposal: proposalSummary?.acceptedProposal ?? null,
   };
 }

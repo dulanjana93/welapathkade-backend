@@ -32,12 +32,14 @@ import {
   CreateConsultationDto,
   DeclineConsultationDto,
 } from './dto/consultation.dto';
+import { ConsultationProposalsService } from './consultation-proposals.service';
 
 @Injectable()
 export class ConsultationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly availability: AvailabilityService,
+    private readonly proposals: ConsultationProposalsService,
   ) {}
 
   async create(user: User, dto: CreateConsultationDto) {
@@ -218,7 +220,8 @@ export class ConsultationsService {
         files: { include: { file: true }, orderBy: { sortOrder: 'asc' } },
       },
     });
-    return toCustomerDetail(full);
+    const proposalSummary = await this.proposals.loadProposalSummary(id);
+    return toCustomerDetail(full, proposalSummary);
   }
 
   async getForAstrologer(user: User, id: string, markViewed = true) {
@@ -250,7 +253,8 @@ export class ConsultationsService {
         files: { include: { file: true }, orderBy: { sortOrder: 'asc' } },
       },
     });
-    return toAstrologerDetail(full);
+    const proposalSummary = await this.proposals.loadProposalSummary(id);
+    return toAstrologerDetail(full, proposalSummary);
   }
 
   /** Shared detail for customer owner or assigned astrologer. */
