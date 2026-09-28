@@ -33,6 +33,7 @@ import {
   DeclineConsultationDto,
 } from './dto/consultation.dto';
 import { ConsultationProposalsService } from './consultation-proposals.service';
+import { PaymentsService } from '../payments/payments.service';
 
 @Injectable()
 export class ConsultationsService {
@@ -40,6 +41,7 @@ export class ConsultationsService {
     private readonly prisma: PrismaService,
     private readonly availability: AvailabilityService,
     private readonly proposals: ConsultationProposalsService,
+    private readonly payments: PaymentsService,
   ) {}
 
   async create(user: User, dto: CreateConsultationDto) {
@@ -221,7 +223,8 @@ export class ConsultationsService {
       },
     });
     const proposalSummary = await this.proposals.loadProposalSummary(id);
-    return toCustomerDetail(full, proposalSummary);
+    const appointment = await this.payments.getSummaryForConsultation(id);
+    return toCustomerDetail(full, proposalSummary, appointment);
   }
 
   async getForAstrologer(user: User, id: string, markViewed = true) {
@@ -254,7 +257,8 @@ export class ConsultationsService {
       },
     });
     const proposalSummary = await this.proposals.loadProposalSummary(id);
-    return toAstrologerDetail(full, proposalSummary);
+    const appointment = await this.payments.getSummaryForConsultation(id);
+    return toAstrologerDetail(full, proposalSummary, appointment);
   }
 
   /** Shared detail for customer owner or assigned astrologer. */

@@ -17,8 +17,10 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { PaymentsService } from '../payments/payments.service';
 import { ConsultationProposalsService } from './consultation-proposals.service';
 import { ConsultationsService } from './consultations.service';
+import { ConfirmCheckoutDto } from './dto/checkout.dto';
 import {
   CreateConsultationDto,
   ListConsultationsQueryDto,
@@ -32,6 +34,7 @@ export class ConsultationsController {
   constructor(
     private readonly consultationsService: ConsultationsService,
     private readonly proposalsService: ConsultationProposalsService,
+    private readonly paymentsService: PaymentsService,
   ) {}
 
   @Post()
@@ -100,6 +103,46 @@ export class ConsultationsController {
       consultationId,
       proposalId,
     );
+  }
+
+  @Post(':consultationId/proposals/:proposalId/checkout')
+  @Roles(UserRole.PUBLIC)
+  @ApiOperation({
+    summary:
+      'Confirm & Pay: reserve the accepted proposal slot and start mock checkout. Amount is server-side only.',
+  })
+  checkout(
+    @CurrentUser() user: User,
+    @Param('consultationId') consultationId: string,
+    @Param('proposalId') proposalId: string,
+    @Body() _dto?: ConfirmCheckoutDto,
+  ) {
+    return this.paymentsService.checkout(user, consultationId, proposalId);
+  }
+
+  @Get(':consultationId/appointment')
+  @Roles(UserRole.PUBLIC)
+  @ApiOperation({
+    summary: 'Get appointment + payment status for own consultation',
+  })
+  getAppointment(
+    @CurrentUser() user: User,
+    @Param('consultationId') consultationId: string,
+  ) {
+    return this.paymentsService.getForCustomer(user, consultationId);
+  }
+
+  @Post(':consultationId/appointment/sync')
+  @Roles(UserRole.PUBLIC)
+  @ApiOperation({
+    summary:
+      'Re-verify payment with the gateway and return current appointment status',
+  })
+  syncAppointment(
+    @CurrentUser() user: User,
+    @Param('consultationId') consultationId: string,
+  ) {
+    return this.paymentsService.syncForCustomer(user, consultationId);
   }
 
   @Get(':id')

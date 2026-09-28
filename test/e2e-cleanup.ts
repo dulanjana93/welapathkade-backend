@@ -9,6 +9,9 @@ import { assertTestDatabase } from '../src/common/database-safety/assert-test-da
 export async function resetE2eDatabase(prisma: PrismaService): Promise<void> {
   assertTestDatabase();
 
+  await prisma.paymentAttempt.deleteMany();
+  await prisma.payment.deleteMany();
+  await prisma.appointment.deleteMany();
   await prisma.consultationProposal.deleteMany();
   await prisma.consultationFile.deleteMany();
   await prisma.consultation.deleteMany();

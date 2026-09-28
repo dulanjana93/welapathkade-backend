@@ -13,8 +13,8 @@ import {
 } from '@prisma/client';
 import { DateTime } from 'luxon';
 import { AvailabilityService } from '../availability/availability.service';
-import type { OccupiedInterval } from '../availability/availability.calculator';
 import { BookingGuardService } from '../availability/booking-guard.service';
+import { OccupancyService } from '../availability/occupancy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateConsultationProposalDto } from './dto/proposal.dto';
 import { summarizeProposals, toProposalView } from './proposal.mapper';
@@ -29,6 +29,7 @@ export class ConsultationProposalsService {
     private readonly prisma: PrismaService,
     private readonly availability: AvailabilityService,
     private readonly bookingGuard: BookingGuardService,
+    private readonly occupancy: OccupancyService,
   ) {}
 
   async createForAstrologer(
@@ -58,10 +59,10 @@ export class ConsultationProposalsService {
       .plus({ minutes: durationMinutes })
       .toJSDate();
 
-    const occupied = await this.loadBlockingIntervals(
-      profile.id,
-      consultationId,
-    );
+    const occupied = await this.occupancy.loadOccupiedIntervals({
+      astrologerId: profile.id,
+      excludeConsultationId: consultationId,
+    });
 
     // Validate availability before taking the booking lock.
     await this.availability.assertProposedSlotEligible({
@@ -110,6 +111,18 @@ export class ConsultationProposalsService {
             `Cannot create proposal when consultation status is ${fresh.status}`,
           );
         }
+
+        const lockedOccupied = await this.occupancy.loadOccupiedIntervals({
+          astrologerId: profile.id,
+          excludeConsultationId: consultationId,
+          db: tx,
+        });
+        await this.availability.assertProposedSlotEligible({
+          astrologerId: profile.id,
+          proposedStartAt,
+          durationMinutes,
+          occupied: lockedOccupied,
+        });
 
         return tx.consultationProposal.create({
           data: {
@@ -184,51 +197,94 @@ export class ConsultationProposalsService {
     }
 
     const now = new Date();
-    const accepted = await this.prisma.$transaction(async (tx) => {
-      const alreadyAccepted = await tx.consultationProposal.findFirst({
-        where: {
-          consultationId,
-          status: ProposalStatus.ACCEPTED,
-        },
-      });
-      if (alreadyAccepted) {
-        throw new ConflictException(
-          'An ACCEPTED proposal already exists for this consultation',
-        );
-      }
+    const accepted = await this.bookingGuard.withAstrologerLock(
+      consultation.astrologerId,
+      async (tx) => {
+        const freshConsultation = await tx.consultation.findUnique({
+          where: { id: consultationId },
+        });
+        if (
+          !freshConsultation ||
+          freshConsultation.customerId !== user.id
+        ) {
+          throw new NotFoundException('Consultation not found');
+        }
+        if (freshConsultation.status !== ConsultationStatus.ACCEPTED) {
+          throw new ConflictException(
+            `Cannot accept proposal when consultation status is ${freshConsultation.status}`,
+          );
+        }
 
-      const updated = await tx.consultationProposal.updateMany({
-        where: {
-          id: proposalId,
-          consultationId,
-          status: ProposalStatus.PENDING,
-        },
-        data: {
-          status: ProposalStatus.ACCEPTED,
-          respondedAt: now,
-        },
-      });
-      if (updated.count === 0) {
-        throw new ConflictException('Proposal could not be accepted');
-      }
+        const freshProposal = await tx.consultationProposal.findFirst({
+          where: { id: proposalId, consultationId },
+        });
+        if (!freshProposal) {
+          throw new NotFoundException('Proposal not found');
+        }
+        if (!canCustomerAcceptProposal(freshProposal.status)) {
+          throw new ConflictException(
+            `Cannot accept proposal in status ${freshProposal.status}`,
+          );
+        }
 
-      // Atomically supersede any other PENDING proposals (race / history safety).
-      await tx.consultationProposal.updateMany({
-        where: {
-          consultationId,
-          status: ProposalStatus.PENDING,
-          id: { not: proposalId },
-        },
-        data: {
-          status: ProposalStatus.SUPERSEDED,
-          respondedAt: now,
-        },
-      });
+        const alreadyAccepted = await tx.consultationProposal.findFirst({
+          where: {
+            consultationId,
+            status: ProposalStatus.ACCEPTED,
+          },
+        });
+        if (alreadyAccepted) {
+          throw new ConflictException(
+            'An ACCEPTED proposal already exists for this consultation',
+          );
+        }
 
-      return tx.consultationProposal.findUniqueOrThrow({
-        where: { id: proposalId },
-      });
-    });
+        const occupied = await this.occupancy.loadOccupiedIntervals({
+          astrologerId: consultation.astrologerId,
+          excludeConsultationId: consultationId,
+          now,
+          db: tx,
+        });
+        await this.availability.assertProposedSlotEligible({
+          astrologerId: consultation.astrologerId,
+          proposedStartAt: freshProposal.proposedStartAt,
+          durationMinutes: freshProposal.durationMinutes,
+          occupied,
+          now,
+        });
+
+        const updated = await tx.consultationProposal.updateMany({
+          where: {
+            id: proposalId,
+            consultationId,
+            status: ProposalStatus.PENDING,
+          },
+          data: {
+            status: ProposalStatus.ACCEPTED,
+            respondedAt: now,
+          },
+        });
+        if (updated.count === 0) {
+          throw new ConflictException('Proposal could not be accepted');
+        }
+
+        await tx.consultationProposal.updateMany({
+          where: {
+            consultationId,
+            status: ProposalStatus.PENDING,
+            id: { not: proposalId },
+          },
+          data: {
+            status: ProposalStatus.SUPERSEDED,
+            respondedAt: now,
+          },
+        });
+
+        return tx.consultationProposal.findUniqueOrThrow({
+          where: { id: proposalId },
+        });
+      },
+    );
 
     return toProposalView(accepted);
   }
@@ -298,32 +354,6 @@ export class ConsultationProposalsService {
       orderBy: [{ createdAt: 'desc' }],
     });
     return rows.map(toProposalView);
-  }
-
-  /**
-   * ACCEPTED proposals for other consultations on this astrologer are treated
-   * as soft occupancy until Phase 5B reservations exist. Does not permanently
-   * block slots and does not create reservation rows.
-   */
-  private async loadBlockingIntervals(
-    astrologerId: string,
-    excludeConsultationId: string,
-  ): Promise<OccupiedInterval[]> {
-    const accepted = await this.prisma.consultationProposal.findMany({
-      where: {
-        status: ProposalStatus.ACCEPTED,
-        consultationId: { not: excludeConsultationId },
-        consultation: { astrologerId },
-      },
-      select: {
-        proposedStartAt: true,
-        proposedEndAt: true,
-      },
-    });
-    return accepted.map((p) => ({
-      startAt: p.proposedStartAt,
-      endAt: p.proposedEndAt,
-    }));
   }
 
   private async requireAstrologerProfile(user: User) {

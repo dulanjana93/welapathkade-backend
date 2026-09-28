@@ -1,4 +1,4 @@
-// Welapathkade Phase 1–5A (Auth … Availability + Consultation Requests + Proposals)
+// Welapathkade Phase 1–5B (Auth … Proposals + Reservation + Mock Payment)
 
 generator client {
   provider = "prisma-client-js"
@@ -118,6 +118,26 @@ enum ConsultationFileType {
   VOICE_NOTE
 }
 
+/// V1 booking hold / confirmed appointment (not the full later lifecycle).
+enum AppointmentStatus {
+  PAYMENT_PENDING
+  CONFIRMED
+  PAYMENT_EXPIRED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  EXPIRED
+  CANCELLED
+}
+
+enum PaymentProvider {
+  MOCK
+}
+
 model User {
   id               String     @id @default(cuid())
   phone            String     @unique
@@ -145,6 +165,7 @@ model User {
   reviewedApplications AstrologerApplication[] @relation("ApplicationReviewer")
   uploadedFiles        File[]                  @relation("FileUploader")
   consultationsAsCustomer Consultation[]       @relation("ConsultationCustomer")
+  appointmentsAsCustomer  Appointment[]        @relation("AppointmentCustomer")
 
   @@index([referredByUserId])
 }
@@ -221,6 +242,7 @@ model AstrologerProfile {
   availabilityExceptions AvailabilityException[]
   bookingGuard           AstrologerBookingGuard?
   consultations          Consultation[]
+  appointments           Appointment[]
 
   @@index([status])
   @@index([city])
@@ -365,6 +387,8 @@ model Consultation {
   service          Service           @relation(fields: [serviceId], references: [id], onDelete: Restrict)
   files            ConsultationFile[]
   proposals        ConsultationProposal[]
+  appointments     Appointment[]
+  payments         Payment[]
 
   @@index([customerId])
   @@index([astrologerId])
@@ -392,11 +416,83 @@ model ConsultationProposal {
   respondedAt      DateTime?
 
   consultation Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  appointment  Appointment?
 
   @@index([consultationId])
   @@index([consultationId, status])
   @@index([status])
   @@index([proposedStartAt])
+}
+
+/// Confirmed booking or timed payment hold. Created at Confirm & Pay only.
+model Appointment {
+  id                   String            @id @default(cuid())
+  consultationId       String
+  proposalId           String            @unique
+  customerId           String
+  astrologerId         String
+  /// Copied from accepted proposal (UTC). Never from the client.
+  startAt              DateTime
+  /// Copied from accepted proposal (UTC). Never from the client.
+  endAt                DateTime
+  durationMinutes      Int
+  status               AppointmentStatus @default(PAYMENT_PENDING)
+  /// Copied from Consultation.requestedPrice. Never from the client.
+  amount               Decimal           @db.Decimal(12, 2)
+  currency             String            @default("LKR") @db.VarChar(8)
+  reservationExpiresAt DateTime
+  confirmedAt          DateTime?
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  consultation Consultation        @relation(fields: [consultationId], references: [id], onDelete: Restrict)
+  proposal     ConsultationProposal @relation(fields: [proposalId], references: [id], onDelete: Restrict)
+  customer     User                @relation("AppointmentCustomer", fields: [customerId], references: [id], onDelete: Restrict)
+  astrologer   AstrologerProfile   @relation(fields: [astrologerId], references: [id], onDelete: Restrict)
+  payments     Payment[]
+
+  @@index([astrologerId, status, startAt])
+  @@index([customerId, status])
+  @@index([consultationId])
+  @@index([status, reservationExpiresAt])
+}
+
+model Payment {
+  id             String          @id @default(cuid())
+  appointmentId  String          @unique
+  consultationId String
+  amount         Decimal         @db.Decimal(12, 2)
+  currency       String          @default("LKR") @db.VarChar(8)
+  status         PaymentStatus   @default(PENDING)
+  provider       PaymentProvider @default(MOCK)
+  paidAt         DateTime?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  appointment  Appointment      @relation(fields: [appointmentId], references: [id], onDelete: Restrict)
+  consultation Consultation     @relation(fields: [consultationId], references: [id], onDelete: Restrict)
+  attempts     PaymentAttempt[]
+
+  @@index([consultationId])
+  @@index([status])
+}
+
+model PaymentAttempt {
+  id                String          @id @default(cuid())
+  paymentId         String
+  provider          PaymentProvider @default(MOCK)
+  merchantReference String          @unique
+  providerPaymentId String?         @unique
+  status            PaymentStatus   @default(PENDING)
+  checkoutPayload   Json?
+  rawNotifyPayload  Json?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([paymentId])
+  @@index([status])
 }
 
 /// Private object metadata only — bytes live in R2 (integration later).

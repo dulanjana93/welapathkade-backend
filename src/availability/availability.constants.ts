@@ -23,3 +23,9 @@ export const MIN_APPOINTMENT_DURATION_MINUTES = 15;
 
 /** Maximum consultation / proposal duration (minutes). */
 export const MAX_APPOINTMENT_DURATION_MINUTES = 240;
+
+/** Confirm & Pay hold duration before the slot is released. */
+export const PAYMENT_RESERVATION_MINUTES = 30;
+
+/** ISO-4217 currency for V1 checkout. */
+export const PAYMENT_CURRENCY = 'LKR';

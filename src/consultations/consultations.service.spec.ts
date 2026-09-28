@@ -44,10 +44,15 @@ describe('ConsultationsService', () => {
     }),
   };
 
+  const payments = {
+    getSummaryForConsultation: jest.fn().mockResolvedValue(null),
+  };
+
   const service = new ConsultationsService(
     prisma as never,
     availability as never,
     proposals as never,
+    payments as never,
   );
 
   const publicUser = {

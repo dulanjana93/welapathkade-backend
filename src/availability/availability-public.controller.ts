@@ -18,7 +18,7 @@ export class AvailabilityPublicController {
   @Get(':id/availability/slots')
   @ApiOperation({
     summary:
-      'Public bookable slots (lead time + horizon applied; no bookings subtracted yet)',
+      'Public bookable slots (lead time, horizon, and occupancy: confirmed appointments, live payment holds, accepted proposals)',
   })
   @ApiQuery({ name: 'from', required: true, example: '2026-09-20' })
   @ApiQuery({ name: 'to', required: true, example: '2026-09-27' })

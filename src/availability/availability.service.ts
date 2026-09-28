@@ -24,6 +24,7 @@ import {
   MIN_BOOKING_LEAD_MINUTES,
 } from './availability.constants';
 import { BookingGuardService } from './booking-guard.service';
+import { OccupancyService } from './occupancy.service';
 import {
   CreateAvailabilityExceptionDto,
   PutWeeklyAvailabilityDto,
@@ -49,6 +50,7 @@ export class AvailabilityService {
     private readonly prisma: PrismaService,
     private readonly calculator: AvailabilityCalculator,
     private readonly bookingGuard: BookingGuardService,
+    private readonly occupancy: OccupancyService,
   ) {}
 
   async ensureOwnProfile(user: User) {
@@ -270,13 +272,14 @@ export class AvailabilityService {
       );
     }
 
-    const [weekly, exceptions] = await Promise.all([
+    const [weekly, exceptions, occupied] = await Promise.all([
       this.prisma.weeklyAvailability.findMany({
         where: { astrologerId: profile.id },
       }),
       this.prisma.availabilityException.findMany({
         where: { astrologerId: profile.id },
       }),
+      this.occupancy.loadOccupiedIntervals({ astrologerId: profile.id }),
     ]);
 
     const slots = this.calculator.enumerateSlots({
@@ -285,7 +288,7 @@ export class AvailabilityService {
       durationMinutes: duration,
       weekly,
       exceptions,
-      occupied: [], // Phase 5+ injects appointments/reservations
+      occupied,
     });
 
     return {
@@ -340,11 +343,15 @@ export class AvailabilityService {
       );
     }
 
+    const occupied = await this.occupancy.loadOccupiedIntervals({
+      astrologerId: profile.id,
+      now,
+    });
     await this.assertStartMatchesAvailableSlot({
       astrologerId: profile.id,
       startAt: start,
       durationMinutes,
-      occupied: [],
+      occupied,
       now,
       mismatchMessage:
         'Preferred time is outside the astrologer availability or booking horizon',

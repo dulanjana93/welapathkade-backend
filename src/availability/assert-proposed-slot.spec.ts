@@ -23,11 +23,13 @@ describe('AvailabilityService.assertProposedSlotEligible', () => {
     availabilityException: { findMany: jest.fn() },
   };
   const bookingGuard = { ensureGuard: jest.fn(), withAstrologerLock: jest.fn() };
+  const occupancy = { loadOccupiedIntervals: jest.fn().mockResolvedValue([]) };
 
   const service = new AvailabilityService(
     prisma as never,
     calculator,
     bookingGuard as never,
+    occupancy as never,
   );
 
   const futureMonday = DateTime.now()

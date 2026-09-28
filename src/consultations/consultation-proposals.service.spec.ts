@@ -35,10 +35,15 @@ describe('ConsultationProposalsService', () => {
     withAstrologerLock: jest.fn(),
   };
 
+  const occupancy = {
+    loadOccupiedIntervals: jest.fn().mockResolvedValue([]),
+  };
+
   const service = new ConsultationProposalsService(
     prisma as never,
     availability as never,
     bookingGuard as never,
+    occupancy as never,
   );
 
   const astroUser = {
@@ -228,31 +233,48 @@ describe('ConsultationProposalsService', () => {
   });
 
   it('12. customer accepts pending proposal', async () => {
-    prisma.consultationProposal.findFirst
-      .mockResolvedValueOnce(mockCreatedProposal())
-      .mockResolvedValueOnce(null);
-    prisma.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => {
-      const tx = {
-        consultationProposal: {
-          findFirst: jest.fn().mockResolvedValue(null),
-          updateMany: jest
-            .fn()
-            .mockResolvedValueOnce({ count: 1 })
-            .mockResolvedValueOnce({ count: 0 }),
-          findUniqueOrThrow: jest.fn().mockResolvedValue(
-            mockCreatedProposal({
-              status: ProposalStatus.ACCEPTED,
-              respondedAt: new Date('2026-09-21T11:00:00.000Z'),
+    prisma.consultationProposal.findFirst.mockResolvedValue(
+      mockCreatedProposal(),
+    );
+    bookingGuard.withAstrologerLock.mockImplementation(
+      async (_id: string, work: (tx: unknown) => unknown) => {
+        const tx = {
+          consultation: {
+            findUnique: jest.fn().mockResolvedValue({
+              id: 'c-1',
+              customerId: 'cust-1',
+              astrologerId: 'ap-1',
+              status: ConsultationStatus.ACCEPTED,
             }),
-          ),
-        },
-      };
-      return fn(tx);
-    });
+          },
+          consultationProposal: {
+            findFirst: jest
+              .fn()
+              .mockResolvedValueOnce(mockCreatedProposal())
+              .mockResolvedValueOnce(null),
+            updateMany: jest
+              .fn()
+              .mockResolvedValueOnce({ count: 1 })
+              .mockResolvedValueOnce({ count: 0 }),
+            findUniqueOrThrow: jest.fn().mockResolvedValue(
+              mockCreatedProposal({
+                status: ProposalStatus.ACCEPTED,
+                respondedAt: new Date('2026-09-21T11:00:00.000Z'),
+              }),
+            ),
+          },
+        };
+        return work(tx);
+      },
+    );
 
     const result = await service.acceptForCustomer(publicUser, 'c-1', 'p-1');
     expect(result.status).toBe(ProposalStatus.ACCEPTED);
     expect(result.respondedAt).toBeTruthy();
+    expect(bookingGuard.withAstrologerLock).toHaveBeenCalledWith(
+      'ap-1',
+      expect.any(Function),
+    );
   });
 
   it('13. customer rejects pending proposal', async () => {
@@ -297,18 +319,31 @@ describe('ConsultationProposalsService', () => {
       .fn()
       .mockResolvedValueOnce({ count: 1 })
       .mockResolvedValueOnce({ count: 1 });
-    prisma.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => {
-      const tx = {
-        consultationProposal: {
-          findFirst: jest.fn().mockResolvedValue(null),
-          updateMany,
-          findUniqueOrThrow: jest.fn().mockResolvedValue(
-            mockCreatedProposal({ status: ProposalStatus.ACCEPTED }),
-          ),
-        },
-      };
-      return fn(tx);
-    });
+    bookingGuard.withAstrologerLock.mockImplementation(
+      async (_id: string, work: (tx: unknown) => unknown) => {
+        const tx = {
+          consultation: {
+            findUnique: jest.fn().mockResolvedValue({
+              id: 'c-1',
+              customerId: 'cust-1',
+              astrologerId: 'ap-1',
+              status: ConsultationStatus.ACCEPTED,
+            }),
+          },
+          consultationProposal: {
+            findFirst: jest
+              .fn()
+              .mockResolvedValueOnce(mockCreatedProposal())
+              .mockResolvedValueOnce(null),
+            updateMany,
+            findUniqueOrThrow: jest.fn().mockResolvedValue(
+              mockCreatedProposal({ status: ProposalStatus.ACCEPTED }),
+            ),
+          },
+        };
+        return work(tx);
+      },
+    );
 
     await service.acceptForCustomer(publicUser, 'c-1', 'p-1');
     expect(updateMany).toHaveBeenNthCalledWith(

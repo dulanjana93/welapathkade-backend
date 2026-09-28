@@ -11,6 +11,7 @@ import {
 import { toMoneyString, type MoneyString } from '../common/money/money';
 import { BUSINESS_TIMEZONE } from '../availability/availability.constants';
 import { DateTime } from 'luxon';
+import type { AppointmentView } from '../payments/appointment.mapper';
 import type { ProposalView } from './proposal.mapper';
 
 export type ConsultationFileMetaView = {
@@ -81,6 +82,7 @@ export type ConsultationDetailView = ConsultationListItemView & {
   proposals: ProposalView[];
   pendingProposal: ProposalView | null;
   acceptedProposal: ProposalView | null;
+  appointment: AppointmentView | null;
 };
 
 type ConsultationWithRelations = Consultation & {
@@ -136,6 +138,7 @@ export function toCustomerDetail(
     pendingProposal: ProposalView | null;
     acceptedProposal: ProposalView | null;
   },
+  appointment?: AppointmentView | null,
 ): ConsultationDetailView {
   return {
     ...toCustomerListItem(c),
@@ -145,6 +148,7 @@ export function toCustomerDetail(
     proposals: proposalSummary?.proposals ?? [],
     pendingProposal: proposalSummary?.pendingProposal ?? null,
     acceptedProposal: proposalSummary?.acceptedProposal ?? null,
+    appointment: appointment ?? null,
   };
 }
 
@@ -155,6 +159,7 @@ export function toAstrologerDetail(
     pendingProposal: ProposalView | null;
     acceptedProposal: ProposalView | null;
   },
+  appointment?: AppointmentView | null,
 ): ConsultationDetailView {
   return {
     ...toAstrologerListItem(c),
@@ -164,5 +169,6 @@ export function toAstrologerDetail(
     proposals: proposalSummary?.proposals ?? [],
     pendingProposal: proposalSummary?.pendingProposal ?? null,
     acceptedProposal: proposalSummary?.acceptedProposal ?? null,
+    appointment: appointment ?? null,
   };
 }

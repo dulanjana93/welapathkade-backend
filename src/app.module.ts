@@ -8,6 +8,7 @@ import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { AvailabilityModule } from './availability/availability.module';
 import { ConsultationsModule } from './consultations/consultations.module';
+import { PaymentsModule } from './payments/payments.module';
 import { HealthModule } from './health/health.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
@@ -30,6 +31,7 @@ import { UsersModule } from './users/users.module';
     AstrologersModule,
     AvailabilityModule,
     ConsultationsModule,
+    PaymentsModule,
     AdminModule,
     AuditModule,
   ],
