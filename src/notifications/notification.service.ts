@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import {
   Prisma,
   UserStatus,
@@ -12,6 +12,7 @@ import {
   type FcmProvider,
   type FcmSendResult,
 } from './fcm-provider.interface';
+import { renderNotificationText } from './notification.templates';
 
 /** Prisma client or an interactive-transaction client. */
 export type NotificationDb = PrismaService | Prisma.TransactionClient;
@@ -100,6 +101,30 @@ export type DeliveryOutcome =
     };
 
 /**
+ * The part of an event the business code knows: what happened and which
+ * entities it concerns. Recipient, language and text are resolved by the
+ * service. Mirrors the typed `CreateNotificationInput` union.
+ */
+export type NotificationEventRef =
+  | {
+      type:
+        | 'CONSULTATION_REQUESTED'
+        | 'CONSULTATION_ACCEPTED'
+        | 'CONSULTATION_DECLINED';
+      consultationId: string;
+    }
+  | {
+      type: 'PROPOSAL_CREATED' | 'PROPOSAL_ACCEPTED' | 'PROPOSAL_REJECTED';
+      consultationId: string;
+      proposalId: string;
+    }
+  | {
+      type: 'APPOINTMENT_CONFIRMED';
+      consultationId: string;
+      appointmentId: string;
+    };
+
+/**
  * Persistence and delivery are deliberately separate:
  *
  *  - `create` only writes the row. Pass the caller's transaction client so the
@@ -110,11 +135,18 @@ export type DeliveryOutcome =
  *
  * `sentAt` means "a push provider accepted at least one device send". It does
  * not mean the user saw anything, and an unsent row is not retried
- * automatically (no worker exists in Phase 6B).
+ * automatically (no worker exists).
+ *
+ * Phase 6C usage from business code, inside the business transaction:
+ *   `const id = await notifications.notifyUser(tx, userId, ref)` (or
+ *   `notifyAstrologerProfile`), then AFTER the transaction/lock resolved:
+ *   `notifications.deliverAfterCommit(ids)`.
  */
 @Injectable()
-export class NotificationService {
+export class NotificationService implements OnModuleDestroy {
   private readonly logger = new Logger(NotificationService.name);
+  /** Deliveries started after commit and not yet settled. */
+  private readonly pending = new Set<Promise<void>>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -169,6 +201,95 @@ export class NotificationService {
       `duplicate notification not readable type=${input.type} referenceId=${referenceId}`,
     );
     return { status: 'DUPLICATE_UNREADABLE' };
+  }
+
+  /**
+   * Record an event for a user inside the caller's transaction.
+   *
+   * Returns the new notification id ONLY when a row was created; `null` for
+   * duplicates and for the one tolerated failure (invalid notification input,
+   * a programming error that must not break the business operation). Every
+   * other error (database, foreign key, deadlock, ...) propagates so the
+   * caller's transaction rolls back.
+   *
+   * `language` avoids a lookup when the caller already has the recipient's
+   * language; pass `undefined` to have it read from the user row.
+   */
+  async notifyUser(
+    tx: Prisma.TransactionClient,
+    userId: string,
+    ref: NotificationEventRef,
+    language?: string | null,
+  ): Promise<string | null> {
+    const lang =
+      language !== undefined
+        ? language
+        : (
+            await tx.user.findUnique({
+              where: { id: userId },
+              select: { language: true },
+            })
+          )?.language;
+    const text = renderNotificationText(ref.type, lang);
+    try {
+      const result = await this.create({ ...ref, userId, ...text }, tx);
+      return result.status === 'CREATED' ? result.notification.id : null;
+    } catch (error) {
+      if (!(error instanceof InvalidNotificationError)) throw error;
+      // Never log ids, text or user details; the type is enough to locate it.
+      this.logger.warn(`notification skipped: invalid input type=${ref.type}`);
+      return null;
+    }
+  }
+
+  /**
+   * Same as `notifyUser`, for an astrologer identified by AstrologerProfile.id
+   * (consultations, proposals and appointments store the profile id, not the
+   * user id). Resolves `AstrologerProfile.userId` and the user's language in
+   * one query on the caller's transaction client.
+   */
+  async notifyAstrologerProfile(
+    tx: Prisma.TransactionClient,
+    astrologerProfileId: string,
+    ref: NotificationEventRef,
+  ): Promise<string | null> {
+    const profile = await tx.astrologerProfile.findUnique({
+      where: { id: astrologerProfileId },
+      select: { userId: true, user: { select: { language: true } } },
+    });
+    if (!profile) return null;
+    return this.notifyUser(tx, profile.userId, ref, profile.user.language);
+  }
+
+  /**
+   * Start best-effort delivery for already-committed notifications.
+   *
+   * Call only after the business transaction (and any lock) has completed.
+   * Does not wait for delivery, never throws and never rejects; in-flight
+   * deliveries are tracked so `flushPending` can await them.
+   */
+  deliverAfterCommit(ids: ReadonlyArray<string | null | undefined>): void {
+    for (const id of ids) {
+      if (!id) continue;
+      const run: Promise<void> = this.deliver(id)
+        .then(() => undefined)
+        .catch(() => undefined)
+        .finally(() => {
+          this.pending.delete(run);
+        });
+      this.pending.add(run);
+    }
+  }
+
+  /** Resolves once every delivery started so far has settled. Never rejects. */
+  async flushPending(): Promise<void> {
+    while (this.pending.size > 0) {
+      await Promise.allSettled([...this.pending]);
+    }
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await this.flushPending();
   }
 
   async findById(

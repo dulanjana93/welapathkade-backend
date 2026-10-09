@@ -19,6 +19,7 @@ import { AuthService } from '../src/auth/auth.service';
 import { TokenService } from '../src/auth/token.service';
 import { BUSINESS_TIMEZONE } from '../src/availability/availability.constants';
 import { CONSULTATION_RESPONSE_TIMEOUT_HOURS } from '../src/consultations/consultation.constants';
+import { NotificationService } from '../src/notifications/notification.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { RedisService } from '../src/redis/redis.service';
 import { UsersService } from '../src/users/users.service';
@@ -56,11 +57,14 @@ describe('Phase 4 Consultation Requests (e2e)', () => {
   });
 
   beforeEach(async () => {
+    // Let post-commit deliveries from the previous test settle first.
+    await app.get(NotificationService).flushPending();
     await resetE2eDatabase(prisma);
     await resetE2eRedisOtps(redis);
   });
 
   afterAll(async () => {
+    await app.get(NotificationService).flushPending();
     await app.close();
   });
 
@@ -586,6 +590,58 @@ describe('Phase 4 Consultation Requests (e2e)', () => {
       where: { id: c5.body.id },
     });
     expect(expired2.status).toBe(ConsultationStatus.EXPIRED);
+  });
+
+  it('notifications: request notifies the astrologer; decline notifies the customer without the reason; a second decline adds nothing', async () => {
+    const astro = await seedBookableAstrologer({ phone: '+94774440009' });
+    const slot = await pickFutureSlot(astro.profileId);
+    const customer = await registerPublic('+94774441009', 'Customer D');
+    const customerBody = customer.body as {
+      accessToken: string;
+      user: { id: string };
+    };
+    const profile = await prisma.astrologerProfile.findUniqueOrThrow({
+      where: { id: astro.profileId },
+    });
+
+    const created = await request(app.getHttpServer())
+      .post('/consultations')
+      .set('Authorization', `Bearer ${customerBody.accessToken}`)
+      .send({
+        astrologerId: astro.profileId,
+        serviceId: astro.serviceId,
+        preferredStartAt: slot.startAt,
+        preferredEndAt: slot.endAt,
+      })
+      .expect(201);
+    const id = (created.body as { id: string }).id;
+
+    await request(app.getHttpServer())
+      .post(`/astrologers/me/consultations/${id}/decline`)
+      .set('Authorization', `Bearer ${astro.token}`)
+      .send({ reason: 'Totally private reason' })
+      .expect(201);
+    await request(app.getHttpServer())
+      .post(`/astrologers/me/consultations/${id}/decline`)
+      .set('Authorization', `Bearer ${astro.token}`)
+      .send({ reason: 'Totally private reason' })
+      .expect(409);
+
+    await app.get(NotificationService).flushPending();
+    const rows = await prisma.notification.findMany();
+    expect(rows.map((r) => r.type).sort()).toEqual([
+      'CONSULTATION_DECLINED',
+      'CONSULTATION_REQUESTED',
+    ]);
+    const requested = rows.find((r) => r.type === 'CONSULTATION_REQUESTED')!;
+    const declined = rows.find((r) => r.type === 'CONSULTATION_DECLINED')!;
+    expect(requested.userId).toBe(profile.userId);
+    expect(requested.referenceId).toBe(id);
+    expect(declined.userId).toBe(customerBody.user.id);
+    expect(declined.referenceId).toBe(id);
+    expect(JSON.stringify(declined).toLowerCase()).not.toContain(
+      'private reason',
+    );
   });
 
   it('application remains APPROVED after consultation flows', async () => {

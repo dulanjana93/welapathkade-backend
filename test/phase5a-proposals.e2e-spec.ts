@@ -15,6 +15,7 @@ import { AppModule } from '../src/app.module';
 import { AuthService } from '../src/auth/auth.service';
 import { TokenService } from '../src/auth/token.service';
 import { BUSINESS_TIMEZONE } from '../src/availability/availability.constants';
+import { NotificationService } from '../src/notifications/notification.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { RedisService } from '../src/redis/redis.service';
 import { UsersService } from '../src/users/users.service';
@@ -54,11 +55,14 @@ describe('Phase 5A Consultation Proposals (e2e)', () => {
   });
 
   beforeEach(async () => {
+    // Let post-commit deliveries from the previous test settle first.
+    await app.get(NotificationService).flushPending();
     await resetE2eDatabase(prisma);
     await resetE2eRedisOtps(redis);
   });
 
   afterAll(async () => {
+    await app.get(NotificationService).flushPending();
     await app.close();
   });
 
@@ -371,6 +375,87 @@ describe('Phase 5A Consultation Proposals (e2e)', () => {
       ProposalStatus.PENDING,
       ProposalStatus.REJECTED,
     ]);
+  });
+
+  it('28. proposal notifications: created, rejected, repeated proposal, accepted; a repeated reject adds nothing', async () => {
+    const ctx = await createAcceptedConsultation({
+      astroPhone: '+94775550003',
+      customerPhone: '+94775551003',
+    });
+    const profile = await prisma.astrologerProfile.findUniqueOrThrow({
+      where: { id: ctx.astro.profileId },
+    });
+    const customer = await prisma.user.findFirstOrThrow({
+      where: { phone: '+94775551003' },
+    });
+
+    const slot1 = await pickFutureSlot(ctx.astro.profileId, 30);
+    const first = await request(app.getHttpServer())
+      .post(`/astrologers/me/consultations/${ctx.consultationId}/proposals`)
+      .set('Authorization', `Bearer ${ctx.astro.token}`)
+      .send({ proposedStartAt: slot1.startAt, durationMinutes: 30 })
+      .expect(201);
+    const firstId = (first.body as { id: string }).id;
+    await request(app.getHttpServer())
+      .post(`/consultations/${ctx.consultationId}/proposals/${firstId}/reject`)
+      .set('Authorization', `Bearer ${ctx.customerToken}`)
+      .expect(201);
+    // Repeating the reject loses the guard: 409 and no second notification.
+    await request(app.getHttpServer())
+      .post(`/consultations/${ctx.consultationId}/proposals/${firstId}/reject`)
+      .set('Authorization', `Bearer ${ctx.customerToken}`)
+      .expect(409);
+
+    const slots = await request(app.getHttpServer())
+      .get(`/astrologers/${ctx.astro.profileId}/availability/slots`)
+      .query({
+        from: DateTime.now()
+          .setZone(BUSINESS_TIMEZONE)
+          .plus({ days: 2 })
+          .toISODate(),
+        to: DateTime.now()
+          .setZone(BUSINESS_TIMEZONE)
+          .plus({ days: 6 })
+          .toISODate(),
+        durationMinutes: 30,
+      })
+      .expect(200);
+    const slotList = (slots.body as { slots: Array<{ startAt: string }> })
+      .slots;
+    const slot2 = slotList[1] ?? slotList[0];
+    const second = await request(app.getHttpServer())
+      .post(`/astrologers/me/consultations/${ctx.consultationId}/proposals`)
+      .set('Authorization', `Bearer ${ctx.astro.token}`)
+      .send({ proposedStartAt: slot2.startAt, durationMinutes: 30 })
+      .expect(201);
+    const secondId = (second.body as { id: string }).id;
+    await request(app.getHttpServer())
+      .post(`/consultations/${ctx.consultationId}/proposals/${secondId}/accept`)
+      .set('Authorization', `Bearer ${ctx.customerToken}`)
+      .expect(201);
+
+    await app.get(NotificationService).flushPending();
+    const all = await prisma.notification.findMany();
+    const rows = all.filter((r) => r.type.startsWith('PROPOSAL_'));
+    const pick = (type: string) => rows.filter((r) => r.type === type);
+
+    // One consultation, two PROPOSAL_CREATED rows: one per proposal.
+    const created = pick('PROPOSAL_CREATED');
+    expect(created.map((r) => r.userId)).toEqual([customer.id, customer.id]);
+    expect(created.map((r) => r.referenceId).sort()).toEqual(
+      [firstId, secondId].sort(),
+    );
+    const rejected = pick('PROPOSAL_REJECTED');
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].userId).toBe(profile.userId);
+    expect(rejected[0].referenceId).toBe(firstId);
+    const accepted = pick('PROPOSAL_ACCEPTED');
+    expect(accepted).toHaveLength(1);
+    expect(accepted[0].userId).toBe(profile.userId);
+    expect(accepted[0].referenceId).toBe(secondId);
+    for (const row of rows) {
+      expect(row.data).toMatchObject({ consultationId: ctx.consultationId });
+    }
   });
 
   it('25. authorization failures', async () => {

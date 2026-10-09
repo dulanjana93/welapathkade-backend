@@ -16,6 +16,7 @@ import {
   UserStatus,
 } from '@prisma/client';
 import { AvailabilityService } from '../availability/availability.service';
+import { NotificationService } from '../notifications/notification.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CONSULTATION_RESPONSE_TIMEOUT_HOURS } from './consultation.constants';
 import {
@@ -42,6 +43,7 @@ export class ConsultationsService {
     private readonly availability: AvailabilityService,
     private readonly proposals: ConsultationProposalsService,
     private readonly payments: PaymentsService,
+    private readonly notifications: NotificationService,
   ) {}
 
   async create(user: User, dto: CreateConsultationDto) {
@@ -165,10 +167,21 @@ export class ConsultationsService {
         });
       }
 
-      return consultation;
+      // Same transaction as the consultation row: both commit or neither.
+      const notificationId = await this.notifications.notifyUser(
+        tx,
+        profile.userId,
+        { type: 'CONSULTATION_REQUESTED', consultationId: consultation.id },
+        profile.user.language,
+      );
+
+      return { consultation, notificationId };
     });
 
-    return this.getForCustomer(user, created.id);
+    // Committed: only now start (non-blocking) delivery.
+    this.notifications.deliverAfterCommit([created.notificationId]);
+
+    return this.getForCustomer(user, created.consultation.id);
   }
 
   async listForCustomer(user: User, status?: ConsultationStatus) {
@@ -294,25 +307,36 @@ export class ConsultationsService {
       throw new ConflictException('Consultation has expired');
     }
 
-    const updated = await this.prisma.consultation.updateMany({
-      where: {
-        id: row.id,
-        astrologerId: profile.id,
-        status: ConsultationStatus.PENDING,
-        expiresAt: { gt: now },
-      },
-      data: {
-        status: ConsultationStatus.ACCEPTED,
-        respondedAt: now,
-      },
+    // State change and notification row commit atomically.
+    const outcome = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.consultation.updateMany({
+        where: {
+          id: row.id,
+          astrologerId: profile.id,
+          status: ConsultationStatus.PENDING,
+          expiresAt: { gt: now },
+        },
+        data: {
+          status: ConsultationStatus.ACCEPTED,
+          respondedAt: now,
+        },
+      });
+      if (updated.count !== 1) return null;
+      const notificationId = await this.notifications.notifyUser(
+        tx,
+        row.customerId,
+        { type: 'CONSULTATION_ACCEPTED', consultationId: row.id },
+      );
+      return { notificationId };
     });
-    if (updated.count === 0) {
+    if (!outcome) {
       const current = await this.loadAndExpire(id);
       if (current?.status === ConsultationStatus.EXPIRED) {
         throw new ConflictException('Consultation has expired');
       }
       throw new ConflictException('Consultation could not be accepted');
     }
+    this.notifications.deliverAfterCommit([outcome.notificationId]);
 
     return this.getForAstrologer(user, id, false);
   }
@@ -339,26 +363,39 @@ export class ConsultationsService {
       throw new ConflictException('Consultation has expired');
     }
 
-    const updated = await this.prisma.consultation.updateMany({
-      where: {
-        id: row.id,
-        astrologerId: profile.id,
-        status: ConsultationStatus.PENDING,
-        expiresAt: { gt: now },
-      },
-      data: {
-        status: ConsultationStatus.DECLINED,
-        respondedAt: now,
-        declineReason: dto.reason?.trim() || null,
-      },
+    // State change and notification row commit atomically. The decline
+    // reason is stored on the consultation only; it is never in the
+    // notification.
+    const outcome = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.consultation.updateMany({
+        where: {
+          id: row.id,
+          astrologerId: profile.id,
+          status: ConsultationStatus.PENDING,
+          expiresAt: { gt: now },
+        },
+        data: {
+          status: ConsultationStatus.DECLINED,
+          respondedAt: now,
+          declineReason: dto.reason?.trim() || null,
+        },
+      });
+      if (updated.count !== 1) return null;
+      const notificationId = await this.notifications.notifyUser(
+        tx,
+        row.customerId,
+        { type: 'CONSULTATION_DECLINED', consultationId: row.id },
+      );
+      return { notificationId };
     });
-    if (updated.count === 0) {
+    if (!outcome) {
       const current = await this.loadAndExpire(id);
       if (current?.status === ConsultationStatus.EXPIRED) {
         throw new ConflictException('Consultation has expired');
       }
       throw new ConflictException('Consultation could not be declined');
     }
+    this.notifications.deliverAfterCommit([outcome.notificationId]);
 
     return this.getForAstrologer(user, id, false);
   }

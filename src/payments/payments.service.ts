@@ -27,6 +27,7 @@ import {
 import { OccupancyService } from '../availability/occupancy.service';
 import { BookingGuardService } from '../availability/booking-guard.service';
 import { toMoneyString } from '../common/money/money';
+import { NotificationService } from '../notifications/notification.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { toAppointmentView, toCheckoutView } from './appointment.mapper';
 import { PAYMENT_GATEWAY, type PaymentGateway } from './payment-gateway';
@@ -47,6 +48,7 @@ export class PaymentsService {
     private readonly occupancy: OccupancyService,
     private readonly bookingGuard: BookingGuardService,
     @Inject(PAYMENT_GATEWAY) private readonly gateway: PaymentGateway,
+    private readonly notifications: NotificationService,
   ) {}
 
   async checkout(user: User, consultationId: string, proposalId: string) {
@@ -413,10 +415,15 @@ export class PaymentsService {
             where: { id: appointment.id },
           });
           if (current.status === AppointmentStatus.CONFIRMED) {
-            return tx.appointment.findUniqueOrThrow({
-              where: { id: appointment.id },
-              include: appointmentInclude,
-            });
+            // Lost the race to another confirmation: the winner already
+            // recorded the notifications, so this path creates none.
+            return {
+              row: await tx.appointment.findUniqueOrThrow({
+                where: { id: appointment.id },
+                include: appointmentInclude,
+              }),
+              notificationIds: [] as Array<string | null>,
+            };
           }
           throw new ConflictException(
             'Reservation has expired; payment will not confirm the appointment',
@@ -435,14 +442,38 @@ export class PaymentsService {
           },
         });
 
-        return tx.appointment.findUniqueOrThrow({
-          where: { id: appointment.id },
-          include: appointmentInclude,
-        });
+        // Authoritative transition: the guarded update above changed exactly
+        // one row (PAYMENT_PENDING -> CONFIRMED). Record one notification per
+        // recipient in this same transaction; duplicates/failed/expired paths
+        // never reach this point.
+        const ref = {
+          type: 'APPOINTMENT_CONFIRMED' as const,
+          consultationId: appointment.consultationId,
+          appointmentId: appointment.id,
+        };
+        const notificationIds = [
+          await this.notifications.notifyUser(tx, appointment.customerId, ref),
+          await this.notifications.notifyAstrologerProfile(
+            tx,
+            appointment.astrologerId,
+            ref,
+          ),
+        ];
+
+        return {
+          row: await tx.appointment.findUniqueOrThrow({
+            where: { id: appointment.id },
+            include: appointmentInclude,
+          }),
+          notificationIds,
+        };
       },
     );
 
-    return { appointment: toAppointmentView(confirmed) };
+    // Lock released and transaction committed: start delivery now.
+    this.notifications.deliverAfterCommit(confirmed.notificationIds);
+
+    return { appointment: toAppointmentView(confirmed.row) };
   }
 
   private newMerchantReference(appointmentId: string) {

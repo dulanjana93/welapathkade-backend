@@ -91,3 +91,82 @@ npm run test:e2e:migrate           # test database
 ```
 
 Never `migrate reset` or `db push`.
+
+---
+
+# Phase 6C: business events
+
+The seven V1 events are now recorded by the business services. Persistence
+happens inside the same database transaction as the state change; delivery
+is started only after that transaction has committed.
+
+## Events, recipients and references
+
+| Event | Written in | Recipient (user id) | `referenceId` |
+|---|---|---|---|
+| `CONSULTATION_REQUESTED` | `ConsultationsService.create` (its `$transaction`) | astrologer: `profile.userId` | consultation id |
+| `CONSULTATION_ACCEPTED` | `ConsultationsService.accept` (now a `$transaction`) | customer: `consultation.customerId` | consultation id |
+| `CONSULTATION_DECLINED` | `ConsultationsService.decline` (now a `$transaction`) | customer | consultation id |
+| `PROPOSAL_CREATED` | `createForAstrologer`, inside `withAstrologerLock` | customer: `consultation.customerId` | new proposal id |
+| `PROPOSAL_ACCEPTED` | `acceptForCustomer`, inside `withAstrologerLock` | astrologer: resolved from `AstrologerProfile.userId` | proposal id |
+| `PROPOSAL_REJECTED` | `rejectForCustomer` (now a `$transaction`) | astrologer (as above) | proposal id |
+| `APPOINTMENT_CONFIRMED` | `PaymentsService.finalizeVerified`, inside `withAstrologerLock` | customer **and** astrologer (two rows) | appointment id |
+
+- Accept, decline and reject create a row only when the guarded `updateMany`
+  changed exactly one row. A lost guard throws/returns as before and records
+  nothing.
+- `APPOINTMENT_CONFIRMED` is recorded only in the branch where the guarded
+  `PAYMENT_PENDING -> CONFIRMED` update changed one row. Repeated callbacks,
+  `alreadyPaid`, failed/expired payments and lost races create nothing. The
+  mock callback and `syncForCustomer` both reach this point.
+- Astrologer recipients are resolved through `AstrologerProfile.userId`;
+  consultations/proposals/appointments store the profile id, never the user id.
+- `consultationId` stays in the payload as the navigation target.
+
+## Text and language
+
+`src/notifications/notification.templates.ts` holds plain per-type EN/SI
+title and body data (no logic, no interpolation), shaped so it can later move
+to database-managed translations. The language is the recipient's
+`User.language`; anything other than `EN` (missing, unknown) renders Sinhala.
+Texts contain no names, services, messages, decline reasons, times or amounts.
+`PROPOSAL_ACCEPTED` says the time was accepted and payment is still pending;
+only `APPOINTMENT_CONFIRMED` speaks of a confirmed appointment.
+
+## Calling pattern (as implemented)
+
+```ts
+const result = await prisma.$transaction(async (tx) => {
+  // business write...
+  const id = await notifications.notifyUser(tx, userId, ref /*, language?*/);
+  // or notifications.notifyAstrologerProfile(tx, astrologerProfileId, ref)
+  return { ..., notificationId: id };
+});
+notifications.deliverAfterCommit([result.notificationId]); // not awaited
+```
+
+- `notifyUser` returns an id only for a newly created row (`null` for
+  duplicates). It tolerates exactly one failure, `InvalidNotificationError`
+  (logged safely, business operation continues). Database, foreign-key,
+  deadlock and any other error propagate and roll the transaction back.
+- `deliverAfterCommit` ignores null ids, never blocks and never rejects.
+  Delivery failures cannot undo the committed business change.
+- In-flight deliveries are tracked; `flushPending()` resolves when they have
+  settled. `onModuleDestroy` awaits them before Prisma disconnects (verified in
+  `notification.lifecycle.spec.ts`). E2E specs also call `flushPending()`
+  explicitly before cleanup and shutdown.
+
+## Limits (V1)
+
+- No automatic retry and no durable outbox: an unsent row (provider down,
+  process crash between commit and delivery) is not retried.
+- `sentAt` is set when any device send is accepted; devices that failed in the
+  same run are not retried individually.
+- No real FCM delivery yet; the provider is console (development) or no-op.
+
+## Tests
+
+```
+npx jest                      # all unit tests
+npm run test:e2e              # guarded; refuses anything but welapathkade_test
+```

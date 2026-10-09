@@ -48,11 +48,17 @@ describe('ConsultationsService', () => {
     getSummaryForConsultation: jest.fn().mockResolvedValue(null),
   };
 
+  const notifications = {
+    notifyUser: jest.fn().mockResolvedValue('n-1'),
+    deliverAfterCommit: jest.fn(),
+  };
+
   const service = new ConsultationsService(
     prisma as never,
     availability as never,
     proposals as never,
     payments as never,
+    notifications as never,
   );
 
   const publicUser = {
@@ -67,15 +73,41 @@ describe('ConsultationsService', () => {
     status: UserStatus.ACTIVE,
   } as never;
 
+  // Records the transaction client handed to the callback and whether the
+  // transaction had completed (committed) at a given moment.
+  const txUsed: { current: unknown; committed: boolean } = {
+    current: undefined,
+    committed: false,
+  };
+
   beforeEach(() => {
     jest.clearAllMocks();
+    txUsed.current = undefined;
+    txUsed.committed = false;
   });
+
+  /** Tx whose guarded updateMany affects `count` rows. */
+  function mockRespondTx(count: number) {
+    const tx = {
+      consultation: { updateMany: jest.fn().mockResolvedValue({ count }) },
+    };
+    prisma.$transaction.mockImplementation(
+      async (fn: (t: unknown) => unknown) => {
+        txUsed.current = tx;
+        const result = await fn(tx);
+        txUsed.committed = true;
+        return result;
+      },
+    );
+    return tx;
+  }
 
   function mockHappyPathCreate() {
     prisma.astrologerProfile.findUnique.mockResolvedValue({
       id: 'ap-1',
+      userId: 'astro-user-1',
       status: AstrologerProfileStatus.ACTIVE,
-      user: { status: UserStatus.ACTIVE },
+      user: { status: UserStatus.ACTIVE, language: 'EN' },
     });
     prisma.service.findUnique.mockResolvedValue({
       id: 'svc-1',
@@ -89,19 +121,24 @@ describe('ConsultationsService', () => {
       price: new Prisma.Decimal('1500.00'),
     });
     availability.assertPreferredSlotEligible.mockResolvedValue(undefined);
-    prisma.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => {
-      const tx = {
-        consultation: {
-          create: jest.fn().mockResolvedValue({
-            id: 'c-1',
-            customerId: 'cust-1',
-            status: ConsultationStatus.PENDING,
-          }),
-        },
-        consultationFile: { createMany: jest.fn() },
-      };
-      return fn(tx);
-    });
+    prisma.$transaction.mockImplementation(
+      async (fn: (tx: unknown) => unknown) => {
+        const tx = {
+          consultation: {
+            create: jest.fn().mockResolvedValue({
+              id: 'c-1',
+              customerId: 'cust-1',
+              status: ConsultationStatus.PENDING,
+            }),
+          },
+          consultationFile: { createMany: jest.fn() },
+        };
+        txUsed.current = tx;
+        const result = await fn(tx);
+        txUsed.committed = true;
+        return result;
+      },
+    );
     prisma.consultation.findUnique.mockResolvedValue({
       id: 'c-1',
       customerId: 'cust-1',
@@ -218,10 +255,10 @@ describe('ConsultationsService', () => {
 
     expect(availability.assertPreferredSlotEligible).toHaveBeenCalled();
     const createArg = (
-      prisma.$transaction.mock.calls[0][0] as (tx: {
-        consultation: { create: jest.Mock };
-      }) => Promise<unknown>
-    );
+      prisma.$transaction.mock.calls as unknown[][]
+    )[0][0] as (tx: {
+      consultation: { create: jest.Mock };
+    }) => Promise<unknown>;
     // Exercise transaction callback path via mock implementation already done.
     expect(result.status).toBe(ConsultationStatus.PENDING);
     expect(result.requestedPrice).toBe('1500.00');
@@ -249,7 +286,7 @@ describe('ConsultationsService', () => {
       expiresAt: new Date(Date.now() + 60_000),
     };
     prisma.consultation.findUnique.mockResolvedValue(pending);
-    prisma.consultation.updateMany.mockResolvedValue({ count: 1 });
+    mockRespondTx(1);
     prisma.consultation.findUniqueOrThrow.mockResolvedValue({
       ...pending,
       status: ConsultationStatus.ACCEPTED,
@@ -277,10 +314,168 @@ describe('ConsultationsService', () => {
       ...pending,
       expiresAt: new Date(Date.now() - 1000),
     });
-    prisma.consultation.updateMany.mockResolvedValue({ count: 1 });
+    mockRespondTx(1);
     await expect(service.accept(astroUser, 'c-1')).rejects.toBeInstanceOf(
       ConflictException,
     );
+  });
+
+  describe('notification integration', () => {
+    const pending = {
+      id: 'c-1',
+      customerId: 'cust-1',
+      astrologerId: 'ap-1',
+      status: ConsultationStatus.PENDING,
+      expiresAt: new Date(Date.now() + 60_000),
+    };
+
+    function loadedRow() {
+      prisma.astrologerProfile.findUnique.mockResolvedValue({
+        id: 'ap-1',
+        userId: 'astro-user-1',
+      });
+      prisma.consultation.findUnique.mockResolvedValue(pending);
+      prisma.consultation.findUniqueOrThrow.mockResolvedValue({
+        ...pending,
+        status: ConsultationStatus.ACCEPTED,
+        astrologerServiceId: 'as-1',
+        serviceId: 'svc-1',
+        requestedPrice: new Prisma.Decimal('1000'),
+        serviceNameSi: 'a',
+        serviceNameEn: 'b',
+        message: null,
+        preferredStartAt: new Date(),
+        preferredEndAt: null,
+        submittedAt: new Date(),
+        viewedAt: null,
+        respondedAt: new Date(),
+        declineReason: null,
+        customer: { id: 'cust-1', name: 'C' },
+        files: [],
+      });
+    }
+
+    const createDto = {
+      astrologerId: 'ap-1',
+      serviceId: 'svc-1',
+      preferredStartAt: '2026-09-20T04:30:00.000Z',
+    };
+
+    it('create: records CONSULTATION_REQUESTED for the astrologer user in the same transaction and delivers after commit', async () => {
+      mockHappyPathCreate();
+      let committedAtDelivery: boolean | undefined;
+      notifications.deliverAfterCommit.mockImplementation(() => {
+        committedAtDelivery = txUsed.committed;
+      });
+
+      await service.create(publicUser, createDto);
+
+      expect(notifications.notifyUser).toHaveBeenCalledTimes(1);
+      expect(notifications.notifyUser).toHaveBeenCalledWith(
+        txUsed.current,
+        'astro-user-1',
+        { type: 'CONSULTATION_REQUESTED', consultationId: 'c-1' },
+        'EN',
+      );
+      expect(notifications.deliverAfterCommit).toHaveBeenCalledWith(['n-1']);
+      expect(committedAtDelivery).toBe(true);
+    });
+
+    it('create: the astrologer profile id is never used as the recipient', async () => {
+      mockHappyPathCreate();
+      await service.create(publicUser, createDto);
+      const calls = notifications.notifyUser.mock.calls as unknown[][];
+      const recipient = calls[0][1];
+      expect(recipient).toBe('astro-user-1');
+      expect(recipient).not.toBe('ap-1');
+    });
+
+    it('create: an unexpected notification failure rolls back and nothing is delivered', async () => {
+      mockHappyPathCreate();
+      notifications.notifyUser.mockRejectedValueOnce(new Error('deadlock'));
+      await expect(service.create(publicUser, createDto)).rejects.toThrow(
+        'deadlock',
+      );
+      expect(notifications.deliverAfterCommit).not.toHaveBeenCalled();
+    });
+
+    it('accept: a guarded update of one row records CONSULTATION_ACCEPTED for the customer in the same transaction', async () => {
+      loadedRow();
+      const tx = mockRespondTx(1);
+      let committedAtDelivery: boolean | undefined;
+      notifications.deliverAfterCommit.mockImplementation(() => {
+        committedAtDelivery = txUsed.committed;
+      });
+
+      await service.accept(astroUser, 'c-1');
+
+      expect(tx.consultation.updateMany).toHaveBeenCalledTimes(1);
+      expect(prisma.consultation.updateMany).not.toHaveBeenCalled();
+      expect(notifications.notifyUser).toHaveBeenCalledWith(tx, 'cust-1', {
+        type: 'CONSULTATION_ACCEPTED',
+        consultationId: 'c-1',
+      });
+      expect(notifications.deliverAfterCommit).toHaveBeenCalledWith(['n-1']);
+      expect(committedAtDelivery).toBe(true);
+    });
+
+    it('accept: a lost guard (0 rows) creates no notification and delivers nothing', async () => {
+      loadedRow();
+      mockRespondTx(0);
+      await expect(service.accept(astroUser, 'c-1')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(notifications.notifyUser).not.toHaveBeenCalled();
+      expect(notifications.deliverAfterCommit).not.toHaveBeenCalled();
+    });
+
+    it('decline: records CONSULTATION_DECLINED for the customer and never carries the reason', async () => {
+      loadedRow();
+      const tx = mockRespondTx(1);
+
+      await service.decline(astroUser, 'c-1', { reason: 'private reason' });
+
+      const updateArg = (
+        tx.consultation.updateMany.mock.calls as unknown[][]
+      )[0][0] as { data: { declineReason: string } };
+      expect(updateArg.data.declineReason).toBe('private reason');
+      expect(notifications.notifyUser).toHaveBeenCalledWith(tx, 'cust-1', {
+        type: 'CONSULTATION_DECLINED',
+        consultationId: 'c-1',
+      });
+      expect(JSON.stringify(notifications.notifyUser.mock.calls)).not.toContain(
+        'private reason',
+      );
+      expect(notifications.deliverAfterCommit).toHaveBeenCalledWith(['n-1']);
+    });
+
+    it('decline: a lost guard (0 rows) creates no notification', async () => {
+      loadedRow();
+      mockRespondTx(0);
+      await expect(
+        service.decline(astroUser, 'c-1', {}),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(notifications.notifyUser).not.toHaveBeenCalled();
+      expect(notifications.deliverAfterCommit).not.toHaveBeenCalled();
+    });
+
+    it('accept: a duplicate or tolerated-invalid result (null id) is passed through so nothing is delivered', async () => {
+      loadedRow();
+      mockRespondTx(1);
+      notifications.notifyUser.mockResolvedValueOnce(null);
+      await service.accept(astroUser, 'c-1');
+      expect(notifications.deliverAfterCommit).toHaveBeenCalledWith([null]);
+    });
+
+    it('accept: an unexpected notification failure propagates and nothing is delivered', async () => {
+      loadedRow();
+      mockRespondTx(1);
+      notifications.notifyUser.mockRejectedValueOnce(new Error('fk failure'));
+      await expect(service.accept(astroUser, 'c-1')).rejects.toThrow(
+        'fk failure',
+      );
+      expect(notifications.deliverAfterCommit).not.toHaveBeenCalled();
+    });
   });
 
   it('customer cannot cancel ACCEPTED', async () => {

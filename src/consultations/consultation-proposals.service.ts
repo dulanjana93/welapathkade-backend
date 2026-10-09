@@ -15,6 +15,7 @@ import { DateTime } from 'luxon';
 import { AvailabilityService } from '../availability/availability.service';
 import { BookingGuardService } from '../availability/booking-guard.service';
 import { OccupancyService } from '../availability/occupancy.service';
+import { NotificationService } from '../notifications/notification.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateConsultationProposalDto } from './dto/proposal.dto';
 import { summarizeProposals, toProposalView } from './proposal.mapper';
@@ -30,6 +31,7 @@ export class ConsultationProposalsService {
     private readonly availability: AvailabilityService,
     private readonly bookingGuard: BookingGuardService,
     private readonly occupancy: OccupancyService,
+    private readonly notifications: NotificationService,
   ) {}
 
   async createForAstrologer(
@@ -124,7 +126,7 @@ export class ConsultationProposalsService {
           occupied: lockedOccupied,
         });
 
-        return tx.consultationProposal.create({
+        const proposal = await tx.consultationProposal.create({
           data: {
             consultationId,
             proposedStartAt,
@@ -133,10 +135,26 @@ export class ConsultationProposalsService {
             status: ProposalStatus.PENDING,
           },
         });
+
+        // Same transaction (and lock) as the proposal row. Deduplicated by
+        // the new proposal id; the consultation id is the navigation target.
+        const notificationId = await this.notifications.notifyUser(
+          tx,
+          fresh.customerId,
+          {
+            type: 'PROPOSAL_CREATED',
+            consultationId,
+            proposalId: proposal.id,
+          },
+        );
+        return { proposal, notificationId };
       },
     );
 
-    return toProposalView(created);
+    // Lock released and transaction committed: start delivery now.
+    this.notifications.deliverAfterCommit([created.notificationId]);
+
+    return toProposalView(created.proposal);
   }
 
   async listForAstrologer(user: User, consultationId: string) {
@@ -280,13 +298,29 @@ export class ConsultationProposalsService {
           },
         });
 
-        return tx.consultationProposal.findUniqueOrThrow({
-          where: { id: proposalId },
-        });
+        const acceptedProposal =
+          await tx.consultationProposal.findUniqueOrThrow({
+            where: { id: proposalId },
+          });
+
+        // "Accepted, payment pending" for the astrologer. consultation.astrologerId
+        // is an AstrologerProfile id, so the user is resolved from the profile.
+        const notificationId = await this.notifications.notifyAstrologerProfile(
+          tx,
+          consultation.astrologerId,
+          {
+            type: 'PROPOSAL_ACCEPTED',
+            consultationId,
+            proposalId,
+          },
+        );
+        return { proposal: acceptedProposal, notificationId };
       },
     );
 
-    return toProposalView(accepted);
+    this.notifications.deliverAfterCommit([accepted.notificationId]);
+
+    return toProposalView(accepted.proposal);
   }
 
   async rejectForCustomer(
@@ -318,25 +352,42 @@ export class ConsultationProposalsService {
     }
 
     const now = new Date();
-    const updated = await this.prisma.consultationProposal.updateMany({
-      where: {
-        id: proposalId,
-        consultationId,
-        status: ProposalStatus.PENDING,
-      },
-      data: {
-        status: ProposalStatus.REJECTED,
-        respondedAt: now,
-      },
-    });
-    if (updated.count === 0) {
-      throw new ConflictException('Proposal could not be rejected');
-    }
+    // State change and notification row commit atomically. A lost guard
+    // (count !== 1) throws inside the transaction, so nothing is written.
+    const result = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.consultationProposal.updateMany({
+        where: {
+          id: proposalId,
+          consultationId,
+          status: ProposalStatus.PENDING,
+        },
+        data: {
+          status: ProposalStatus.REJECTED,
+          respondedAt: now,
+        },
+      });
+      if (updated.count !== 1) {
+        throw new ConflictException('Proposal could not be rejected');
+      }
 
-    const rejected = await this.prisma.consultationProposal.findUniqueOrThrow({
-      where: { id: proposalId },
+      const rejected = await tx.consultationProposal.findUniqueOrThrow({
+        where: { id: proposalId },
+      });
+      const notificationId = await this.notifications.notifyAstrologerProfile(
+        tx,
+        consultation.astrologerId,
+        {
+          type: 'PROPOSAL_REJECTED',
+          consultationId,
+          proposalId,
+        },
+      );
+      return { proposal: rejected, notificationId };
     });
-    return toProposalView(rejected);
+
+    this.notifications.deliverAfterCommit([result.notificationId]);
+
+    return toProposalView(result.proposal);
   }
 
   /** Load proposal history for consultation detail enrichment. */

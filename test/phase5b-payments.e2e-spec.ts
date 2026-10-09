@@ -13,6 +13,8 @@ import { AppModule } from '../src/app.module';
 import { AuthService } from '../src/auth/auth.service';
 import { TokenService } from '../src/auth/token.service';
 import { BUSINESS_TIMEZONE } from '../src/availability/availability.constants';
+import { NotificationService } from '../src/notifications/notification.service';
+import { renderNotificationText } from '../src/notifications/notification.templates';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { RedisService } from '../src/redis/redis.service';
 import { UsersService } from '../src/users/users.service';
@@ -52,11 +54,14 @@ describe('Phase 5B payments (e2e)', () => {
   });
 
   beforeEach(async () => {
+    // Let post-commit deliveries from the previous test settle first.
+    await app.get(NotificationService).flushPending();
     await resetE2eDatabase(prisma);
     await resetE2eRedisOtps(redis);
   });
 
   afterAll(async () => {
+    await app.get(NotificationService).flushPending();
     await app.close();
   });
 
@@ -326,6 +331,100 @@ describe('Phase 5B payments (e2e)', () => {
     expect(synced.body.status).toBe(AppointmentStatus.CONFIRMED);
   });
 
+  it('notifications: one row per event and recipient across the full lifecycle; callback replays and sync add none', async () => {
+    const ctx = await acceptedProposal({
+      astroPhone: '+94776660002',
+      customerPhone: '+94776661002',
+    });
+    const astroProfile = await prisma.astrologerProfile.findUniqueOrThrow({
+      where: { id: ctx.astro.profileId },
+      include: { user: true },
+    });
+    const customerUser = await prisma.user.findFirstOrThrow({
+      where: { phone: '+94776661002' },
+    });
+
+    const checkout = await request(app.getHttpServer())
+      .post(
+        `/consultations/${ctx.consultationId}/proposals/${ctx.proposalId}/checkout`,
+      )
+      .set('Authorization', `Bearer ${ctx.customerToken}`)
+      .expect(201);
+    const checkoutBody = checkout.body as {
+      appointment: {
+        id: string;
+        payment: { latestAttempt: { merchantReference: string } };
+      };
+    };
+    const appointmentId = checkoutBody.appointment.id;
+    const merchantReference =
+      checkoutBody.appointment.payment.latestAttempt.merchantReference;
+
+    const notifications = app.get(NotificationService);
+    await notifications.flushPending();
+    // Before payment there is no APPOINTMENT_CONFIRMED.
+    expect(
+      await prisma.notification.count({
+        where: { type: 'APPOINTMENT_CONFIRMED' },
+      }),
+    ).toBe(0);
+
+    const pay = () =>
+      request(app.getHttpServer())
+        .post('/payments/callbacks/mock')
+        .send({
+          merchantReference,
+          success: true,
+          amount: '1500.00',
+          currency: 'LKR',
+        })
+        .expect(201);
+    await pay();
+    await pay(); // repeated callback
+    await request(app.getHttpServer())
+      .post(`/consultations/${ctx.consultationId}/appointment/sync`)
+      .set('Authorization', `Bearer ${ctx.customerToken}`)
+      .expect(201);
+    await notifications.flushPending();
+
+    const rows = await prisma.notification.findMany();
+    const who = (userId: string) =>
+      userId === astroProfile.userId
+        ? 'astrologer'
+        : userId === customerUser.id
+          ? 'customer'
+          : 'unexpected';
+    expect(
+      rows.map((r) => `${r.type}|${who(r.userId)}|${r.referenceId}`).sort(),
+    ).toEqual(
+      [
+        `CONSULTATION_REQUESTED|astrologer|${ctx.consultationId}`,
+        `CONSULTATION_ACCEPTED|customer|${ctx.consultationId}`,
+        `PROPOSAL_CREATED|customer|${ctx.proposalId}`,
+        `PROPOSAL_ACCEPTED|astrologer|${ctx.proposalId}`,
+        `APPOINTMENT_CONFIRMED|customer|${appointmentId}`,
+        `APPOINTMENT_CONFIRMED|astrologer|${appointmentId}`,
+      ].sort(),
+    );
+
+    for (const row of rows) {
+      const recipient =
+        row.userId === astroProfile.userId ? astroProfile.user : customerUser;
+      const text = renderNotificationText(row.type, recipient.language);
+      expect(row.title).toBe(text.title);
+      expect(row.body).toBe(text.body);
+      expect(row.data).toMatchObject({
+        type: row.type,
+        consultationId: ctx.consultationId,
+      });
+      // No provider accepted anything (no-op provider, no devices).
+      expect(row.sentAt).toBeNull();
+      expect(row.attempts).toBe(0);
+    }
+    const accepted = rows.find((r) => r.type === 'PROPOSAL_ACCEPTED');
+    expect(accepted?.body).toMatch(/pending|තවමත්/);
+  });
+
   it('amount mismatch does not confirm', async () => {
     const ctx = await acceptedProposal({
       astroPhone: '+94776660002',
@@ -354,6 +453,12 @@ describe('Phase 5B payments (e2e)', () => {
       where: { consultationId: ctx.consultationId },
     });
     expect(row.status).toBe(AppointmentStatus.PAYMENT_PENDING);
+    await app.get(NotificationService).flushPending();
+    expect(
+      await prisma.notification.count({
+        where: { type: 'APPOINTMENT_CONFIRMED' },
+      }),
+    ).toBe(0);
   });
 
   it('expired reservation does not confirm late payment', async () => {
@@ -389,6 +494,12 @@ describe('Phase 5B payments (e2e)', () => {
       where: { id: checkout.body.appointment.id },
     });
     expect(row.status).not.toBe(AppointmentStatus.CONFIRMED);
+    await app.get(NotificationService).flushPending();
+    expect(
+      await prisma.notification.count({
+        where: { type: 'APPOINTMENT_CONFIRMED' },
+      }),
+    ).toBe(0);
   });
 
   it('accepted proposal blocks overlapping proposal create (D4)', async () => {
