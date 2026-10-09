@@ -1,4 +1,13 @@
-import { IsEnum, IsInt, IsNotEmpty, IsString, Max, Min } from 'class-validator';
+import {
+  IsEnum,
+  IsIn,
+  IsInt,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Max,
+  Min,
+} from 'class-validator';
 import { Transform } from 'class-transformer';
 
 export enum NodeEnv {
@@ -36,4 +45,18 @@ export class EnvironmentVariables {
   @IsString()
   @IsNotEmpty()
   BUSINESS_TIMEZONE!: string;
+
+  /**
+   * Optional. Push provider: console | noop. Defaults by NODE_ENV.
+   * Trimmed and lower-cased before validation; empty/whitespace means unset.
+   * Matches `resolveFcmProviderKind`, which normalizes the same way at runtime.
+   */
+  @Transform(({ value }: { value: unknown }) => {
+    if (typeof value !== 'string') return value;
+    const normalized = value.trim().toLowerCase();
+    return normalized === '' ? undefined : normalized;
+  })
+  @IsOptional()
+  @IsIn(['console', 'noop'])
+  NOTIFICATIONS_FCM_PROVIDER?: string;
 }

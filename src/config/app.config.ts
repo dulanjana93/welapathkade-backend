@@ -8,4 +8,5 @@ export default registerAs('app', () => ({
   jwtAccessSecret: process.env.JWT_ACCESS_SECRET,
   jwtRefreshSecret: process.env.JWT_REFRESH_SECRET,
   businessTimezone: process.env.BUSINESS_TIMEZONE ?? 'Asia/Colombo',
+  notificationsFcmProvider: process.env.NOTIFICATIONS_FCM_PROVIDER,
 }));

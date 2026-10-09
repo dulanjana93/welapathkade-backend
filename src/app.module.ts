@@ -10,6 +10,7 @@ import { AvailabilityModule } from './availability/availability.module';
 import { ConsultationsModule } from './consultations/consultations.module';
 import { PaymentsModule } from './payments/payments.module';
 import { HealthModule } from './health/health.module';
+import { NotificationsModule } from './notifications/notifications.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
 import { ServicesModule } from './services/services.module';
@@ -32,6 +33,7 @@ import { UsersModule } from './users/users.module';
     AvailabilityModule,
     ConsultationsModule,
     PaymentsModule,
+    NotificationsModule,
     AdminModule,
     AuditModule,
   ],

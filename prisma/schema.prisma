@@ -1,4 +1,4 @@
-// Welapathkade Phase 1–5B (Auth … Proposals + Reservation + Mock Payment)
+// Welapathkade Phase 1–5B (Auth … Proposals + Reservation + Mock Payment) + Phase 6B (Notifications)
 
 generator client {
   provider = "prisma-client-js"
@@ -166,6 +166,7 @@ model User {
   uploadedFiles        File[]                  @relation("FileUploader")
   consultationsAsCustomer Consultation[]       @relation("ConsultationCustomer")
   appointmentsAsCustomer  Appointment[]        @relation("AppointmentCustomer")
+  notifications           Notification[]
 
   @@index([referredByUserId])
 }
@@ -549,4 +550,44 @@ model AuditLog {
   @@index([adminUserId])
   @@index([entityType, entityId])
   @@index([createdAt])
+}
+
+/// Phase 6B: V1 notification events (stable contract for FCM `data.type`).
+enum NotificationType {
+  CONSULTATION_REQUESTED
+  CONSULTATION_ACCEPTED
+  CONSULTATION_DECLINED
+  PROPOSAL_CREATED
+  PROPOSAL_ACCEPTED
+  PROPOSAL_REJECTED
+  APPOINTMENT_CONFIRMED
+}
+
+/// One persisted notification per recipient per business event.
+/// A row means "the event was recorded", NOT "the user was notified":
+/// `sentAt` is set only when a push provider accepted the message.
+/// Contains routing ids and generic text only — never consultation content.
+model Notification {
+  id          String           @id @default(cuid())
+  userId      String
+  type        NotificationType
+  /// Idempotency entity: consultationId (CONSULTATION_*), proposalId (PROPOSAL_*),
+  /// appointmentId (APPOINTMENT_CONFIRMED).
+  referenceId String
+  title       String           @db.VarChar(160)
+  body        String           @db.VarChar(500)
+  /// Routing ids only (type, consultationId, proposalId, appointmentId).
+  data        Json
+  createdAt   DateTime         @default(now())
+  /// Set when at least one device push was accepted by the provider.
+  sentAt      DateTime?
+  /// Number of delivery runs that actually tried a provider send.
+  attempts    Int              @default(0)
+
+  /// Restrict: a user with notification history cannot be hard-deleted silently.
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([userId, type, referenceId])
+  @@index([userId, createdAt])
+  @@index([sentAt, createdAt])
 }
