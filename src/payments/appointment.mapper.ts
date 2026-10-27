@@ -39,6 +39,15 @@ export type AppointmentView = {
   currency: string;
   reservationExpiresAt: string;
   confirmedAt: string | null;
+  sessionStartedAt: string | null;
+  sessionEndedAt: string | null;
+  actualDurationSeconds: number | null;
+  cancelledAt: string | null;
+  cancelReason: string | null;
+  noShowRecordedAt: string | null;
+  /** FULL_REFUND_DUE records an obligation; it does not mean money was refunded. */
+  refundObligation: string | null;
+  manualReviewRequired: boolean;
   localDate: string | null;
   localStartTime: string;
   localEndTime: string;
@@ -85,6 +94,14 @@ export function toAppointmentView(
     currency: row.currency,
     reservationExpiresAt: row.reservationExpiresAt.toISOString(),
     confirmedAt: row.confirmedAt ? row.confirmedAt.toISOString() : null,
+    sessionStartedAt: row.sessionStartedAt?.toISOString() ?? null,
+    sessionEndedAt: row.sessionEndedAt?.toISOString() ?? null,
+    actualDurationSeconds: row.actualDurationSeconds ?? null,
+    cancelledAt: row.cancelledAt?.toISOString() ?? null,
+    cancelReason: row.cancelReason ?? null,
+    noShowRecordedAt: row.noShowRecordedAt?.toISOString() ?? null,
+    refundObligation: row.refundObligation ?? null,
+    manualReviewRequired: row.manualReviewRequired ?? false,
     localDate: localStart.toISODate(),
     localStartTime: localStart.toFormat('HH:mm'),
     localEndTime: localEnd.toFormat('HH:mm'),
@@ -110,6 +127,17 @@ export function toAppointmentView(
       : null,
     ...(checkout ? {} : {}),
   };
+}
+
+/**
+ * Astrologer-facing appointment view. It never carries payment details: the
+ * customer's payment attempt and merchant reference are private to the
+ * customer, so the payment sub-object is always null here.
+ */
+export function toAstrologerAppointmentView(
+  row: AppointmentWithPayment,
+): AppointmentView {
+  return toAppointmentView({ ...row, payments: [] });
 }
 
 export function toCheckoutView(

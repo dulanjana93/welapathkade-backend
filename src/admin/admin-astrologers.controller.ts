@@ -39,7 +39,9 @@ export class AdminAstrologersController {
   constructor(private readonly astrologersService: AstrologersService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List astrologers (optional application status filter)' })
+  @ApiOperation({
+    summary: 'List astrologers (optional application status filter)',
+  })
   @ApiQuery({
     name: 'applicationStatus',
     required: false,
@@ -59,7 +61,8 @@ export class AdminAstrologersController {
 
   @Patch(':id')
   @ApiOperation({
-    summary: 'Update astrologer profile status (operational suspension/activation)',
+    summary:
+      'Update astrologer profile status (operational suspension/activation)',
   })
   updateStatus(
     @Param('id') id: string,
@@ -69,7 +72,9 @@ export class AdminAstrologersController {
   }
 
   @Patch(':id/application')
-  @ApiOperation({ summary: 'Approve or reject a pending astrologer application' })
+  @ApiOperation({
+    summary: 'Approve or reject a pending astrologer application',
+  })
   reviewApplication(
     @Param('id') id: string,
     @CurrentUser() admin: User,

@@ -37,6 +37,29 @@ describe('MockPaymentGateway', () => {
     expect(verified.pending).toBe(false);
   });
 
+  it('does not invent a currency: a missing one stays empty', async () => {
+    const notify = await gateway.verifyNotify(
+      {},
+      JSON.stringify({ merchantReference: 'wp_ref_2', success: true }),
+    );
+    expect(notify.currency).toBe('');
+    expect(notify.amount).toBe('');
+  });
+
+  it('keeps amount and currency the caller supplied (normalised amount)', async () => {
+    const notify = await gateway.verifyNotify(
+      {},
+      JSON.stringify({
+        merchantReference: 'wp_ref_3',
+        success: true,
+        amount: '1500',
+        currency: 'LKR',
+      }),
+    );
+    expect(notify.amount).toBe('1500.00');
+    expect(notify.currency).toBe('LKR');
+  });
+
   it('verifyByReference is pending until a successful notify', async () => {
     const pending = await gateway.verifyByReference('never-paid');
     expect(pending.success).toBe(false);

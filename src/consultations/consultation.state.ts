@@ -9,21 +9,30 @@ import { ConsultationStatus } from '@prisma/client';
  *  ├── 12h timeout     → EXPIRED
  *  └── CUSTOMER_CANCEL → CANCELLED
  *
- * ACCEPTED is not terminal (appointment proposal follows in Phase 5).
- * DECLINED / EXPIRED / CANCELLED are terminal for the request lifecycle.
+ * ACCEPTED
+ *  ├── APPOINTMENT_CLOSED    → CANCELLED  (linked appointment cancelled / no-show)
+ *  └── APPOINTMENT_COMPLETED → COMPLETED  (linked appointment completed)
+ *
+ * The two ACCEPTED transitions are driven only by AppointmentLifecycleService,
+ * in the same transaction as the appointment transition. The appointment keeps
+ * the exact outcome (who cancelled, which participant was absent).
+ * DECLINED / EXPIRED / CANCELLED / COMPLETED are terminal.
  */
 export const CONSULTATION_TERMINAL_STATUSES: ReadonlySet<ConsultationStatus> =
   new Set([
     ConsultationStatus.DECLINED,
     ConsultationStatus.EXPIRED,
     ConsultationStatus.CANCELLED,
+    ConsultationStatus.COMPLETED,
   ]);
 
 export type ConsultationTransition =
   | 'ACCEPT'
   | 'DECLINE'
   | 'TIMEOUT'
-  | 'CUSTOMER_CANCEL';
+  | 'CUSTOMER_CANCEL'
+  | 'APPOINTMENT_CLOSED'
+  | 'APPOINTMENT_COMPLETED';
 
 const ALLOWED: Record<
   ConsultationTransition,
@@ -44,6 +53,14 @@ const ALLOWED: Record<
   CUSTOMER_CANCEL: {
     from: ConsultationStatus.PENDING,
     to: ConsultationStatus.CANCELLED,
+  },
+  APPOINTMENT_CLOSED: {
+    from: ConsultationStatus.ACCEPTED,
+    to: ConsultationStatus.CANCELLED,
+  },
+  APPOINTMENT_COMPLETED: {
+    from: ConsultationStatus.ACCEPTED,
+    to: ConsultationStatus.COMPLETED,
   },
 };
 

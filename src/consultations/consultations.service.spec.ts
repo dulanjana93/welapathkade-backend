@@ -6,12 +6,17 @@ import {
 import {
   AstrologerProfileStatus,
   AstrologerServiceStatus,
+  ConsultationFileType,
   ConsultationStatus,
   ServiceStatus,
   UserRole,
   UserStatus,
 } from '@prisma/client';
 import { Prisma } from '@prisma/client';
+import {
+  CONSULTATION_IDEMPOTENCY_CONFLICT,
+  consultationRequestFingerprint,
+} from './consultation-idempotency';
 import { ConsultationsService } from './consultations.service';
 import { CONSULTATION_RESPONSE_TIMEOUT_HOURS } from './consultation.constants';
 
@@ -42,15 +47,37 @@ describe('ConsultationsService', () => {
       pendingProposal: null,
       acceptedProposal: null,
     }),
+    loadProposalSummaries: jest.fn().mockResolvedValue(new Map()),
   };
 
   const payments = {
-    getSummaryForConsultation: jest.fn().mockResolvedValue(null),
+    getSummaryForCustomer: jest.fn().mockResolvedValue(null),
+    getSummaryForAstrologer: jest.fn().mockResolvedValue(null),
+    listLatestAppointmentViews: jest.fn().mockResolvedValue(new Map()),
   };
 
   const notifications = {
     notifyUser: jest.fn().mockResolvedValue('n-1'),
     deliverAfterCommit: jest.fn(),
+  };
+
+  const followUp = {
+    buildFollowUpView: jest.fn().mockResolvedValue({
+      available: false,
+      isOpen: false,
+      expiresAt: null,
+      customerMessagesSent: 0,
+      customerMessagesRemaining: 5,
+      canSend: false,
+    }),
+  };
+
+  const reviews = {
+    buildDetailExtras: jest.fn().mockResolvedValue({
+      myReview: null,
+      canSubmitReview: false,
+      canEditReview: false,
+    }),
   };
 
   const service = new ConsultationsService(
@@ -59,6 +86,8 @@ describe('ConsultationsService', () => {
     proposals as never,
     payments as never,
     notifications as never,
+    followUp as never,
+    reviews as never,
   );
 
   const publicUser = {
@@ -82,6 +111,8 @@ describe('ConsultationsService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    // Real Prisma always returns { count }; the expiry helper reads it.
+    prisma.consultation.updateMany.mockResolvedValue({ count: 0 });
     txUsed.current = undefined;
     txUsed.committed = false;
   });
@@ -107,6 +138,7 @@ describe('ConsultationsService', () => {
       id: 'ap-1',
       userId: 'astro-user-1',
       status: AstrologerProfileStatus.ACTIVE,
+      isOnline: true,
       user: { status: UserStatus.ACTIVE, language: 'EN' },
     });
     prisma.service.findUnique.mockResolvedValue({
@@ -206,10 +238,27 @@ describe('ConsultationsService', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
+  it('rejects new requests when astrologer is Offline', async () => {
+    prisma.astrologerProfile.findUnique.mockResolvedValue({
+      id: 'ap-1',
+      status: AstrologerProfileStatus.ACTIVE,
+      isOnline: false,
+      user: { status: UserStatus.ACTIVE },
+    });
+    await expect(
+      service.create(publicUser, {
+        astrologerId: 'ap-1',
+        serviceId: 'svc-1',
+        preferredStartAt: '2026-09-20T04:30:00.000Z',
+      }),
+    ).rejects.toThrow('Astrologer is offline and not accepting new requests');
+  });
+
   it('rejects inactive service and unoffered service', async () => {
     prisma.astrologerProfile.findUnique.mockResolvedValue({
       id: 'ap-1',
       status: AstrologerProfileStatus.ACTIVE,
+      isOnline: true,
       user: { status: UserStatus.ACTIVE },
     });
     prisma.service.findUnique.mockResolvedValue({
@@ -318,6 +367,88 @@ describe('ConsultationsService', () => {
     await expect(service.accept(astroUser, 'c-1')).rejects.toBeInstanceOf(
       ConflictException,
     );
+  });
+
+  describe('list lifecycle enrichment', () => {
+    const row = (id: string, status: ConsultationStatus) => ({
+      id,
+      customerId: 'cust-1',
+      astrologerId: 'ap-1',
+      status,
+      message: null,
+      requestedPrice: new Prisma.Decimal('2500'),
+      serviceNameSi: 'x',
+      serviceNameEn: 'x',
+      serviceId: 's-1',
+      preferredStartAt: new Date('2030-01-10T04:30:00Z'),
+      preferredEndAt: null,
+      submittedAt: new Date(),
+      viewedAt: null,
+      respondedAt: null,
+      expiresAt: new Date(Date.now() + 3600_000),
+      customer: { id: 'cust-1', name: 'C' },
+      astrologer: { id: 'ap-1', displayName: 'A' },
+    });
+
+    const findManyWhere = () =>
+      (
+        prisma.consultation.findMany.mock.calls[0] as unknown as [
+          { where: unknown },
+        ]
+      )[0].where;
+
+    it('customer list scopes to own rows and enriches with bulk lifecycle data', async () => {
+      prisma.consultation.findMany.mockResolvedValue([
+        row('c-1', ConsultationStatus.PENDING),
+        row('c-2', ConsultationStatus.ACCEPTED),
+      ]);
+      const result = (await service.listForCustomer(
+        publicUser,
+      )) as unknown as Array<{
+        actionability: { stage: string; canCancelRequest: boolean };
+        appointmentSummary: unknown;
+      }>;
+      expect(findManyWhere()).toMatchObject({
+        customerId: 'cust-1',
+      });
+      expect(proposals.loadProposalSummaries).toHaveBeenCalledWith([
+        'c-1',
+        'c-2',
+      ]);
+      expect(payments.listLatestAppointmentViews).toHaveBeenCalledWith([
+        'c-1',
+        'c-2',
+      ]);
+      expect(result[0].actionability.stage).toBe('REQUEST_PENDING');
+      expect(result[0].actionability.canCancelRequest).toBe(true);
+      expect(result[1].actionability.stage).toBe('AWAITING_PROPOSAL');
+      expect(result[1].appointmentSummary).toBeNull();
+    });
+
+    it('astrologer list scopes to own profile and grants respond only to pending requests', async () => {
+      prisma.astrologerProfile.findUnique.mockResolvedValue({ id: 'ap-1' });
+      prisma.consultation.findMany.mockResolvedValue([
+        row('c-1', ConsultationStatus.PENDING),
+        row('c-2', ConsultationStatus.ACCEPTED),
+      ]);
+      const result = (await service.listForAstrologer(
+        astroUser,
+      )) as unknown as Array<{
+        actionability: { canRespondToRequest: boolean; canPropose: boolean };
+      }>;
+      expect(findManyWhere()).toMatchObject({
+        astrologerId: 'ap-1',
+      });
+      expect(result[0].actionability.canRespondToRequest).toBe(true);
+      expect(result[1].actionability.canPropose).toBe(true);
+      expect(result[1].actionability.canRespondToRequest).toBe(false);
+    });
+
+    it('rejects the wrong role', async () => {
+      await expect(service.listForCustomer(astroUser)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+    });
   });
 
   describe('notification integration', () => {
@@ -488,5 +619,282 @@ describe('ConsultationsService', () => {
     await expect(service.cancel(publicUser, 'c-1')).rejects.toBeInstanceOf(
       ConflictException,
     );
+  });
+  describe('appointment summary audience (payment privacy)', () => {
+    const row = {
+      id: 'c-1',
+      customerId: 'cust-1',
+      astrologerId: 'ap-1',
+      astrologerServiceId: 'as-1',
+      serviceId: 'svc-1',
+      requestedPrice: '1500.00',
+      serviceNameSi: 'කේන්දර',
+      serviceNameEn: 'Horoscope',
+      message: null,
+      status: ConsultationStatus.ACCEPTED,
+      preferredStartAt: new Date('2026-10-01T04:30:00.000Z'),
+      preferredEndAt: null,
+      submittedAt: new Date('2026-09-30T04:30:00.000Z'),
+      viewedAt: new Date('2026-09-30T05:00:00.000Z'),
+      respondedAt: null,
+      expiresAt: new Date(Date.now() + 3_600_000),
+      declineReason: null,
+      completedAt: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      files: [],
+      astrologer: { id: 'ap-1', displayName: 'Nimal' },
+      customer: { id: 'cust-1', name: 'Kamal' },
+    };
+
+    beforeEach(() => {
+      prisma.consultation.findUnique.mockResolvedValue(row);
+      prisma.consultation.findUniqueOrThrow.mockResolvedValue(row);
+      prisma.astrologerProfile.findUnique.mockResolvedValue({
+        id: 'ap-1',
+        userId: 'astro-user-1',
+      });
+    });
+
+    it("the customer's detail uses the customer summary (with their payment)", async () => {
+      await service.getForCustomer(publicUser, 'c-1');
+      expect(payments.getSummaryForCustomer).toHaveBeenCalledWith('c-1');
+      expect(payments.getSummaryForAstrologer).not.toHaveBeenCalled();
+    });
+
+    it("the astrologer's detail uses the payment-free summary", async () => {
+      await service.getForAstrologer(astroUser, 'c-1', false);
+      expect(payments.getSummaryForAstrologer).toHaveBeenCalledWith('c-1');
+      expect(payments.getSummaryForCustomer).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('create idempotency', () => {
+    const key = 'retry-key-01';
+    const createDto = {
+      astrologerId: 'ap-1',
+      serviceId: 'svc-1',
+      preferredStartAt: '2026-09-20T04:30:00.000Z',
+      message: '  hello  ',
+      files: [{ fileId: 'file-1', type: ConsultationFileType.IMAGE }],
+    };
+    const fingerprint = consultationRequestFingerprint({
+      astrologerId: 'ap-1',
+      serviceId: 'svc-1',
+      preferredStartAt: new Date('2026-09-20T04:30:00.000Z'),
+      preferredEndAt: null,
+      message: 'hello',
+      files: [{ fileId: 'file-1', type: ConsultationFileType.IMAGE }],
+    });
+
+    function pendingRow() {
+      return {
+        id: 'c-1',
+        customerId: 'cust-1',
+        status: ConsultationStatus.PENDING,
+        expiresAt: new Date(Date.now() + 3_600_000),
+      };
+    }
+
+    function mockLookup(
+      matches: Array<{ id: string; requestFingerprint: string } | null>,
+    ) {
+      let index = 0;
+      prisma.consultation.findUnique.mockImplementation(
+        (args: {
+          where: {
+            id?: string;
+            customerId_clientIdempotencyKey?: { customerId: string };
+          };
+        }) => {
+          if (args.where.customerId_clientIdempotencyKey) {
+            const row = matches[Math.min(index, matches.length - 1)] ?? null;
+            index += 1;
+            return Promise.resolve(row);
+          }
+          return Promise.resolve(pendingRow());
+        },
+      );
+    }
+
+    function mockCreateTx(options?: {
+      existing?: { id: string; requestFingerprint: string } | null;
+      createError?: unknown;
+    }) {
+      const tx = {
+        consultation: {
+          findUnique: jest.fn().mockResolvedValue(options?.existing ?? null),
+          create: options?.createError
+            ? jest.fn().mockRejectedValue(options.createError)
+            : jest.fn().mockResolvedValue({
+                id: 'c-1',
+                customerId: 'cust-1',
+                status: ConsultationStatus.PENDING,
+              }),
+        },
+        file: {
+          findMany: jest.fn().mockResolvedValue([
+            {
+              id: 'file-1',
+              mimeType: 'image/png',
+              consultationFiles: [],
+            },
+          ]),
+        },
+        consultationFile: { createMany: jest.fn() },
+      };
+      prisma.$transaction.mockImplementation(
+        async (fn: (client: typeof tx) => Promise<unknown>) => fn(tx),
+      );
+      return tx;
+    }
+
+    it('stores the key on the first submission and notifies once', async () => {
+      mockHappyPathCreate();
+      mockLookup([null]);
+      const tx = mockCreateTx();
+
+      const result = await service.create(publicUser, createDto, key);
+
+      expect(result.status).toBe(ConsultationStatus.PENDING);
+      expect(tx.consultation.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+          data: expect.objectContaining({
+            clientIdempotencyKey: key,
+            requestFingerprint: fingerprint,
+            message: 'hello',
+          }),
+        }),
+      );
+      expect(notifications.notifyUser).toHaveBeenCalledTimes(1);
+      expect(notifications.deliverAfterCommit).toHaveBeenCalledWith(['n-1']);
+    });
+
+    it('returns the original consultation when the response was lost', async () => {
+      mockHappyPathCreate();
+      mockLookup([{ id: 'c-1', requestFingerprint: fingerprint }]);
+
+      const result = await service.create(publicUser, createDto, key);
+
+      expect(result.id).toBe('c-1');
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(availability.assertPreferredSlotEligible).not.toHaveBeenCalled();
+      expect(notifications.notifyUser).not.toHaveBeenCalled();
+      expect(notifications.deliverAfterCommit).not.toHaveBeenCalled();
+    });
+
+    it('does not link files again when a concurrent insert already won', async () => {
+      mockHappyPathCreate();
+      mockLookup([null]);
+      const tx = mockCreateTx({
+        existing: { id: 'c-1', requestFingerprint: fingerprint },
+      });
+
+      await service.create(publicUser, createDto, key);
+
+      expect(tx.consultation.create).not.toHaveBeenCalled();
+      expect(tx.consultationFile.createMany).not.toHaveBeenCalled();
+      expect(notifications.notifyUser).not.toHaveBeenCalled();
+    });
+
+    it('replays after a unique-constraint race with the same payload', async () => {
+      mockHappyPathCreate();
+      mockLookup([null, { id: 'c-1', requestFingerprint: fingerprint }]);
+      const tx = mockCreateTx({
+        createError: new Prisma.PrismaClientKnownRequestError(
+          'Unique constraint failed',
+          {
+            code: 'P2002',
+            clientVersion: 'test',
+            meta: { target: ['customerId', 'clientIdempotencyKey'] },
+          },
+        ),
+      });
+
+      const result = await service.create(publicUser, createDto, key);
+
+      expect(result.id).toBe('c-1');
+      expect(tx.consultationFile.createMany).not.toHaveBeenCalled();
+      expect(notifications.deliverAfterCommit).not.toHaveBeenCalled();
+    });
+
+    it('rejects the same key when the payload differs', async () => {
+      mockHappyPathCreate();
+      mockLookup([{ id: 'c-1', requestFingerprint: 'different' }]);
+
+      await expect(
+        service.create(
+          publicUser,
+          { ...createDto, message: 'something else' },
+          key,
+        ),
+      ).rejects.toThrow(CONSULTATION_IDEMPOTENCY_CONFLICT);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('looks up the key for the authenticated customer only', async () => {
+      mockHappyPathCreate();
+      const seen: string[] = [];
+      prisma.consultation.findUnique.mockImplementation(
+        (args: {
+          where: {
+            id?: string;
+            customerId_clientIdempotencyKey?: { customerId: string };
+          };
+        }) => {
+          const scoped = args.where.customerId_clientIdempotencyKey;
+          if (scoped) {
+            seen.push(scoped.customerId);
+            return Promise.resolve({
+              id: `c-${scoped.customerId}`,
+              requestFingerprint: fingerprint,
+            });
+          }
+          const customerId = (args.where.id ?? 'c-cust-1').replace(/^c-/, '');
+          return Promise.resolve({
+            ...pendingRow(),
+            id: args.where.id ?? 'c-cust-1',
+            customerId,
+          });
+        },
+      );
+      prisma.consultation.findUniqueOrThrow.mockImplementation(
+        (args: { where: { id: string } }) =>
+          Promise.resolve({
+            id: args.where.id,
+            customerId: 'cust-1',
+            astrologerId: 'ap-1',
+            astrologerServiceId: 'as-1',
+            serviceId: 'svc-1',
+            status: ConsultationStatus.PENDING,
+            requestedPrice: new Prisma.Decimal('1500.00'),
+            serviceNameSi: 'කේන්දර',
+            serviceNameEn: 'Horoscope',
+            message: 'hello',
+            preferredStartAt: new Date('2026-09-20T04:30:00.000Z'),
+            preferredEndAt: null,
+            submittedAt: new Date('2026-09-19T10:00:00.000Z'),
+            viewedAt: null,
+            respondedAt: null,
+            expiresAt: new Date('2026-09-19T22:00:00.000Z'),
+            declineReason: null,
+            astrologer: { id: 'ap-1', displayName: 'Nimal' },
+            files: [],
+          }),
+      );
+      const otherCustomer = {
+        id: 'cust-2',
+        role: UserRole.PUBLIC,
+        status: UserStatus.ACTIVE,
+      } as never;
+
+      const first = await service.create(publicUser, createDto, key);
+      const second = await service.create(otherCustomer, createDto, key);
+
+      expect(seen).toEqual(['cust-1', 'cust-2']);
+      expect(first.id).toBe('c-cust-1');
+      expect(second.id).toBe('c-cust-2');
+    });
   });
 });

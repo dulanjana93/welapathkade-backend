@@ -9,11 +9,7 @@ import {
   Put,
   UseGuards,
 } from '@nestjs/common';
-import {
-  ApiBearerAuth,
-  ApiOperation,
-  ApiTags,
-} from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { UserRole, type User } from '@prisma/client';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -44,10 +40,7 @@ export class AvailabilityMeController {
   @ApiOperation({
     summary: 'Replace own weekly availability schedule (full replace)',
   })
-  putWeekly(
-    @CurrentUser() user: User,
-    @Body() dto: PutWeeklyAvailabilityDto,
-  ) {
+  putWeekly(@CurrentUser() user: User, @Body() dto: PutWeeklyAvailabilityDto) {
     return this.availabilityService.putOwnWeeklyAvailability(user, dto);
   }
 

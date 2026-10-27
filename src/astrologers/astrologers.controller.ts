@@ -1,7 +1,13 @@
 import { Controller, Get, Param, Query } from '@nestjs/common';
-import { ApiOkResponse, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import {
+  ApiOkResponse,
+  ApiOperation,
+  ApiQuery,
+  ApiTags,
+} from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { IsNumber, IsOptional, IsString, Min } from 'class-validator';
+import { ListAstrologerReviewsQueryDto } from '../consultations/dto/review.dto';
 import { AstrologersService } from './astrologers.service';
 
 class ListAstrologersQueryDto {
@@ -41,6 +47,22 @@ export class AstrologersController {
       minPrice: query.minPrice,
       maxPrice: query.maxPrice,
     });
+  }
+
+  @Get(':id/reviews')
+  @ApiOperation({
+    summary:
+      'List public privacy-safe reviews for an astrologer (newest first, paginated)',
+  })
+  listReviews(
+    @Param('id') id: string,
+    @Query() query: ListAstrologerReviewsQueryDto,
+  ) {
+    return this.astrologersService.listPublicReviews(
+      id,
+      query.page,
+      query.limit,
+    );
   }
 
   @Get(':id')

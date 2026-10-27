@@ -10,6 +10,7 @@ import {
   AstrologerServiceStatus,
   ConsultationStatus,
   FileStatus,
+  Prisma,
   ServiceStatus,
   User,
   UserRole,
@@ -18,22 +19,30 @@ import {
 import { AvailabilityService } from '../availability/availability.service';
 import { NotificationService } from '../notifications/notification.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { attachmentLimitsFromEnv } from './attachment-limits';
+import { assertAttachmentsLinkable } from './attachment-validation';
+import { isAttachmentUniqueConflict } from './consultation-attachments.service';
+import {
+  CONSULTATION_IDEMPOTENCY_CONFLICT,
+  consultationRequestFingerprint,
+  isPrismaUniqueConflict,
+} from './consultation-idempotency';
 import { CONSULTATION_RESPONSE_TIMEOUT_HOURS } from './consultation.constants';
+import { expirePendingConsultations } from './consultation-expiry';
 import {
   toAstrologerDetail,
-  toAstrologerListItem,
+  toAstrologerListEntry,
   toCustomerDetail,
-  toCustomerListItem,
+  toCustomerListEntry,
 } from './consultation.mapper';
-import {
-  canAstrologerRespond,
-  canCustomerCancel,
-} from './consultation.state';
+import { canAstrologerRespond, canCustomerCancel } from './consultation.state';
 import {
   CreateConsultationDto,
   DeclineConsultationDto,
 } from './dto/consultation.dto';
 import { ConsultationProposalsService } from './consultation-proposals.service';
+import { ConsultationFollowUpService } from './consultation-follow-up.service';
+import { ConsultationReviewsService } from './consultation-reviews.service';
 import { PaymentsService } from '../payments/payments.service';
 
 @Injectable()
@@ -44,11 +53,19 @@ export class ConsultationsService {
     private readonly proposals: ConsultationProposalsService,
     private readonly payments: PaymentsService,
     private readonly notifications: NotificationService,
+    private readonly followUp: ConsultationFollowUpService,
+    private readonly reviews: ConsultationReviewsService,
   ) {}
 
-  async create(user: User, dto: CreateConsultationDto) {
+  async create(
+    user: User,
+    dto: CreateConsultationDto,
+    idempotencyKey: string | null = null,
+  ) {
     if (user.role !== UserRole.PUBLIC) {
-      throw new ForbiddenException('Only PUBLIC customers can create consultations');
+      throw new ForbiddenException(
+        'Only PUBLIC customers can create consultations',
+      );
     }
     if (user.status !== UserStatus.ACTIVE) {
       throw new ForbiddenException('Account is not active');
@@ -58,6 +75,30 @@ export class ConsultationsService {
     const preferredEndAt = dto.preferredEndAt
       ? new Date(dto.preferredEndAt)
       : null;
+    const message = dto.message?.trim() || null;
+    const fileAttachments = dto.files ?? [];
+    const fingerprint = idempotencyKey
+      ? consultationRequestFingerprint({
+          astrologerId: dto.astrologerId,
+          serviceId: dto.serviceId,
+          preferredStartAt,
+          preferredEndAt,
+          message,
+          files: fileAttachments,
+        })
+      : null;
+
+    if (idempotencyKey && fingerprint) {
+      const replay = await this.lookupIdempotentSubmission(
+        this.prisma,
+        user.id,
+        idempotencyKey,
+        fingerprint,
+      );
+      if (replay) {
+        return this.getForCustomer(user, replay.id);
+      }
+    }
 
     const profile = await this.prisma.astrologerProfile.findUnique({
       where: { id: dto.astrologerId },
@@ -74,6 +115,11 @@ export class ConsultationsService {
     }
     if (profile.user.status !== UserStatus.ACTIVE) {
       throw new BadRequestException('Astrologer is not available');
+    }
+    if (!profile.isOnline) {
+      throw new BadRequestException(
+        'Astrologer is offline and not accepting new requests',
+      );
     }
 
     const platformService = await this.prisma.service.findUnique({
@@ -108,78 +154,119 @@ export class ConsultationsService {
       preferredEndAt,
     });
 
-    const fileAttachments = dto.files ?? [];
-    if (fileAttachments.length > 0) {
-      const fileIds = fileAttachments.map((f) => f.fileId);
-      const uniqueIds = new Set(fileIds);
-      if (uniqueIds.size !== fileIds.length) {
-        throw new BadRequestException('Duplicate file attachments');
-      }
-      const files = await this.prisma.file.findMany({
-        where: {
-          id: { in: fileIds },
-          uploadedByUserId: user.id,
-          status: { in: [FileStatus.AVAILABLE, FileStatus.UPLOADING] },
-        },
-      });
-      if (files.length !== fileIds.length) {
-        throw new BadRequestException(
-          'One or more files are missing or not owned by you',
-        );
-      }
-    }
-
     const submittedAt = new Date();
     const expiresAt = new Date(
       submittedAt.getTime() +
         CONSULTATION_RESPONSE_TIMEOUT_HOURS * 60 * 60 * 1000,
     );
 
-    const created = await this.prisma.$transaction(async (tx) => {
-      const consultation = await tx.consultation.create({
-        data: {
-          customerId: user.id,
-          astrologerId: profile.id,
-          astrologerServiceId: astrologerService.id,
-          serviceId: platformService.id,
-          requestedPrice: astrologerService.price,
-          serviceNameSi: platformService.nameSi,
-          serviceNameEn: platformService.nameEn,
-          message: dto.message?.trim() || null,
-          status: ConsultationStatus.PENDING,
-          preferredStartAt,
-          preferredEndAt,
-          submittedAt,
-          expiresAt,
-          viewedAt: null,
-          respondedAt: null,
-        },
-      });
+    let created: {
+      consultation: { id: string };
+      notificationId: string | null;
+    };
+    try {
+      created = await this.prisma.$transaction(async (tx) => {
+        if (idempotencyKey && fingerprint) {
+          const replay = await this.lookupIdempotentSubmission(
+            tx,
+            user.id,
+            idempotencyKey,
+            fingerprint,
+          );
+          if (replay) {
+            return { consultation: replay, notificationId: null };
+          }
+        }
 
-      if (fileAttachments.length > 0) {
-        await tx.consultationFile.createMany({
-          data: fileAttachments.map((f, index) => ({
-            consultationId: consultation.id,
-            fileId: f.fileId,
-            type: f.type,
-            sortOrder: index,
-          })),
+        const consultation = await tx.consultation.create({
+          data: {
+            customerId: user.id,
+            astrologerId: profile.id,
+            astrologerServiceId: astrologerService.id,
+            serviceId: platformService.id,
+            requestedPrice: astrologerService.price,
+            serviceNameSi: platformService.nameSi,
+            serviceNameEn: platformService.nameEn,
+            message,
+            status: ConsultationStatus.PENDING,
+            preferredStartAt,
+            preferredEndAt,
+            submittedAt,
+            expiresAt,
+            viewedAt: null,
+            respondedAt: null,
+            clientIdempotencyKey: idempotencyKey,
+            requestFingerprint: fingerprint,
+          },
         });
+
+        if (fileAttachments.length > 0) {
+          const fileIds = fileAttachments.map((f) => f.fileId);
+          const files = await tx.file.findMany({
+            where: {
+              id: { in: fileIds },
+              uploadedByUserId: user.id,
+              status: FileStatus.AVAILABLE,
+            },
+            include: { consultationFiles: { select: { id: true } } },
+          });
+          assertAttachmentsLinkable(
+            files.map((file) => ({
+              id: file.id,
+              mimeType: file.mimeType,
+              linked: file.consultationFiles.length > 0,
+            })),
+            fileAttachments,
+            attachmentLimitsFromEnv(),
+          );
+          try {
+            await tx.consultationFile.createMany({
+              data: fileAttachments.map((f, index) => ({
+                consultationId: consultation.id,
+                fileId: f.fileId,
+                type: f.type,
+                sortOrder: index,
+              })),
+            });
+          } catch (error) {
+            if (isAttachmentUniqueConflict(error)) {
+              throw new BadRequestException(
+                'One or more files are already attached to a request',
+              );
+            }
+            throw error;
+          }
+        }
+
+        // Same transaction as the consultation row: both commit or neither.
+        const notificationId = await this.notifications.notifyUser(
+          tx,
+          profile.userId,
+          { type: 'CONSULTATION_REQUESTED', consultationId: consultation.id },
+          profile.user.language,
+        );
+
+        return { consultation, notificationId };
+      });
+    } catch (error) {
+      if (idempotencyKey && fingerprint && isPrismaUniqueConflict(error)) {
+        const replay = await this.lookupIdempotentSubmission(
+          this.prisma,
+          user.id,
+          idempotencyKey,
+          fingerprint,
+        );
+        if (replay) {
+          return this.getForCustomer(user, replay.id);
+        }
       }
+      throw error;
+    }
 
-      // Same transaction as the consultation row: both commit or neither.
-      const notificationId = await this.notifications.notifyUser(
-        tx,
-        profile.userId,
-        { type: 'CONSULTATION_REQUESTED', consultationId: consultation.id },
-        profile.user.language,
-      );
-
-      return { consultation, notificationId };
-    });
-
-    // Committed: only now start (non-blocking) delivery.
-    this.notifications.deliverAfterCommit([created.notificationId]);
+    // Committed: only now start (non-blocking) delivery. Replays skip this.
+    if (created.notificationId) {
+      this.notifications.deliverAfterCommit([created.notificationId]);
+    }
 
     return this.getForCustomer(user, created.consultation.id);
   }
@@ -200,7 +287,8 @@ export class ConsultationsService {
       },
       orderBy: [{ submittedAt: 'desc' }],
     });
-    return rows.map(toCustomerListItem);
+    const lifecycle = await this.loadListLifecycle(rows.map((r) => r.id));
+    return rows.map((r) => toCustomerListEntry(r, lifecycle.get(r.id)));
   }
 
   async listForAstrologer(user: User, status?: ConsultationStatus) {
@@ -217,7 +305,32 @@ export class ConsultationsService {
       },
       orderBy: [{ submittedAt: 'desc' }],
     });
-    return rows.map(toAstrologerListItem);
+    const lifecycle = await this.loadListLifecycle(rows.map((r) => r.id));
+    return rows.map((r) => toAstrologerListEntry(r, lifecycle.get(r.id)));
+  }
+
+  /**
+   * Proposal + latest-appointment facts for list rows, in two bulk queries.
+   * The caller has already scoped `ids` to the viewer's own consultations.
+   */
+  private async loadListLifecycle(ids: string[]) {
+    const [summaries, appointments] = await Promise.all([
+      this.proposals.loadProposalSummaries(ids),
+      this.payments.listLatestAppointmentViews(ids),
+    ]);
+    return new Map(
+      ids.map((id) => {
+        const summary = summaries.get(id);
+        return [
+          id,
+          {
+            pendingProposal: summary?.pendingProposal ?? null,
+            acceptedProposal: summary?.acceptedProposal ?? null,
+            appointment: appointments.get(id) ?? null,
+          },
+        ] as const;
+      }),
+    );
   }
 
   async getForCustomer(user: User, id: string) {
@@ -236,8 +349,27 @@ export class ConsultationsService {
       },
     });
     const proposalSummary = await this.proposals.loadProposalSummary(id);
-    const appointment = await this.payments.getSummaryForConsultation(id);
-    return toCustomerDetail(full, proposalSummary, appointment);
+    const appointment = await this.payments.getSummaryForCustomer(id);
+    const followUp = await this.followUp.buildFollowUpView({
+      consultationId: id,
+      customerId: full.customerId,
+      consultationStatus: full.status,
+      appointmentStatus: appointment?.status ?? null,
+      completedAt: full.completedAt,
+      viewerIsCustomer: true,
+    });
+    const reviewExtras = await this.reviews.buildDetailExtras(
+      id,
+      full.customerId,
+      appointment,
+      full.status,
+    );
+    return toCustomerDetail(full, proposalSummary, appointment, {
+      followUp,
+      myReview: reviewExtras.myReview,
+      canSubmitReview: reviewExtras.canSubmitReview,
+      canEditReview: reviewExtras.canEditReview,
+    });
   }
 
   async getForAstrologer(user: User, id: string, markViewed = true) {
@@ -270,8 +402,16 @@ export class ConsultationsService {
       },
     });
     const proposalSummary = await this.proposals.loadProposalSummary(id);
-    const appointment = await this.payments.getSummaryForConsultation(id);
-    return toAstrologerDetail(full, proposalSummary, appointment);
+    const appointment = await this.payments.getSummaryForAstrologer(id);
+    const followUp = await this.followUp.buildFollowUpView({
+      consultationId: id,
+      customerId: full.customerId,
+      consultationStatus: full.status,
+      appointmentStatus: appointment?.status ?? null,
+      completedAt: full.completedAt,
+      viewerIsCustomer: false,
+    });
+    return toAstrologerDetail(full, proposalSummary, appointment, { followUp });
   }
 
   /** Shared detail for customer owner or assigned astrologer. */
@@ -445,6 +585,28 @@ export class ConsultationsService {
     return profile;
   }
 
+  private async lookupIdempotentSubmission(
+    db: Prisma.TransactionClient | PrismaService,
+    customerId: string,
+    idempotencyKey: string,
+    fingerprint: string,
+  ): Promise<{ id: string } | null> {
+    const existing = await db.consultation.findUnique({
+      where: {
+        customerId_clientIdempotencyKey: {
+          customerId,
+          clientIdempotencyKey: idempotencyKey,
+        },
+      },
+      select: { id: true, requestFingerprint: true },
+    });
+    if (!existing) return null;
+    if (existing.requestFingerprint !== fingerprint) {
+      throw new ConflictException(CONSULTATION_IDEMPOTENCY_CONFLICT);
+    }
+    return { id: existing.id };
+  }
+
   private async loadAndExpire(id: string) {
     const row = await this.prisma.consultation.findUnique({ where: { id } });
     if (!row) return null;
@@ -460,37 +622,16 @@ export class ConsultationsService {
 
   /** Idempotent PENDING → EXPIRED when expiresAt <= now. */
   private async expireIfDue(id: string, now: Date = new Date()) {
-    await this.prisma.consultation.updateMany({
-      where: {
-        id,
-        status: ConsultationStatus.PENDING,
-        expiresAt: { lte: now },
-      },
-      data: { status: ConsultationStatus.EXPIRED },
-    });
+    await expirePendingConsultations(this.prisma, now, { id });
   }
 
   private async expireDuePendingForCustomer(customerId: string) {
-    const now = new Date();
-    await this.prisma.consultation.updateMany({
-      where: {
-        customerId,
-        status: ConsultationStatus.PENDING,
-        expiresAt: { lte: now },
-      },
-      data: { status: ConsultationStatus.EXPIRED },
-    });
+    await expirePendingConsultations(this.prisma, new Date(), { customerId });
   }
 
   private async expireDuePendingForAstrologer(astrologerId: string) {
-    const now = new Date();
-    await this.prisma.consultation.updateMany({
-      where: {
-        astrologerId,
-        status: ConsultationStatus.PENDING,
-        expiresAt: { lte: now },
-      },
-      data: { status: ConsultationStatus.EXPIRED },
+    await expirePendingConsultations(this.prisma, new Date(), {
+      astrologerId,
     });
   }
 }

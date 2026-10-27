@@ -92,7 +92,11 @@ enum ConsultationStatus {
   ACCEPTED
   DECLINED
   EXPIRED
+  /// Closed without a held session: customer cancelled the request, or the linked
+  /// appointment was cancelled / a no-show. The exact reason lives on the Appointment.
   CANCELLED
+  /// The linked appointment completed via a verified session-end event.
+  COMPLETED
 }
 
 /// Appointment time proposal (not a booking / reservation / payment).
@@ -105,6 +109,7 @@ enum ProposalStatus {
 
 enum FileProvider {
   CLOUDFLARE_R2
+  LOCAL
 }
 
 enum FileStatus {
@@ -116,6 +121,8 @@ enum FileStatus {
 enum ConsultationFileType {
   KUNDALI
   VOICE_NOTE
+  DOCUMENT
+  IMAGE
 }
 
 /// V1 booking hold / confirmed appointment (not the full later lifecycle).
@@ -123,7 +130,41 @@ enum AppointmentStatus {
   PAYMENT_PENDING
   CONFIRMED
   PAYMENT_EXPIRED
+  /// Legacy Phase 5B value. Never written by the lifecycle; use the explicit CANCELLED_BY_* values.
   CANCELLED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED_BY_CUSTOMER
+  CANCELLED_BY_ASTROLOGER
+  /// Customer absent, astrologer present. Requires manual review before any settlement.
+  NO_SHOW_CUSTOMER
+  /// Astrologer absent, customer present. 100% refund obligation.
+  NO_SHOW_ASTROLOGER
+  /// Neither participant joined. 100% refund obligation; no earnings or commissions.
+  NO_SHOW_BOTH
+}
+
+/// A refund the platform OWES the customer. This records an obligation only —
+/// it does not mean money was refunded (refund processing is a later phase).
+enum RefundObligation {
+  FULL_REFUND_DUE
+}
+
+enum ReliabilityIncidentType {
+  CANCELLATION
+  NO_SHOW
+}
+
+/// Participant role on a verified video-session attendance evidence row.
+enum SessionAttendanceParticipantRole {
+  CUSTOMER
+  ASTROLOGER
+}
+
+/// Join/leave fact kinds. B3-a records facts only; it does not infer no-show outcomes.
+enum SessionAttendanceEventKind {
+  PARTICIPANT_JOINED
+  PARTICIPANT_LEFT
 }
 
 enum PaymentStatus {
@@ -166,7 +207,23 @@ model User {
   uploadedFiles        File[]                  @relation("FileUploader")
   consultationsAsCustomer Consultation[]       @relation("ConsultationCustomer")
   appointmentsAsCustomer  Appointment[]        @relation("AppointmentCustomer")
+  consultationFollowUpMessages ConsultationFollowUpMessage[]
+  consultationReviews     ConsultationReview[] @relation("ConsultationReviewCustomer")
   notifications           Notification[]
+  walletAccount           WalletAccount?
+  ledgerEntries           LedgerEntry[]
+  bankAccounts            AstrologerBankAccount[]
+  withdrawalRequests      WithdrawalRequest[] @relation("WithdrawalOwner")
+  withdrawalDebits        WithdrawalDebit[]
+  withdrawalEvents        WithdrawalEvent[]   @relation("WithdrawalEventActor")
+  withdrawalsApproved     WithdrawalRequest[] @relation("WithdrawalApprovedBy")
+  withdrawalsRejected     WithdrawalRequest[] @relation("WithdrawalRejectedBy")
+  withdrawalsPaid         WithdrawalRequest[] @relation("WithdrawalPaidBy")
+  withdrawalsCancelled    WithdrawalRequest[] @relation("WithdrawalCancelledBy")
+  /// Admin-only referral attribution corrections targeting this user.
+  referralCorrectionsAsTarget ReferralAttributionCorrection[] @relation("ReferralCorrectionTarget")
+  /// Admin actor rows for referral attribution corrections.
+  referralCorrectionsAsAdmin  ReferralAttributionCorrection[] @relation("ReferralCorrectionAdmin")
 
   @@index([referredByUserId])
 }
@@ -233,6 +290,9 @@ model AstrologerProfile {
   district        String?
   /// Operational status (ACTIVE / INACTIVE / SUSPENDED). Separate from application status.
   status          AstrologerProfileStatus @default(INACTIVE)
+  /// Manual presence: accepting new consultation requests. Independent of weekly
+  /// availability, appointments and Agora call state. Defaults Offline.
+  isOnline        Boolean                 @default(false)
   createdAt       DateTime                @default(now())
   updatedAt       DateTime                @updatedAt
 
@@ -244,8 +304,12 @@ model AstrologerProfile {
   bookingGuard           AstrologerBookingGuard?
   consultations          Consultation[]
   appointments           Appointment[]
+  reliabilityIncidents   AstrologerReliabilityIncident[]
+  reviews                ConsultationReview[]
+  financialSnapshots     AppointmentFinancialSnapshot[]
 
   @@index([status])
+  @@index([isOnline])
   @@index([city])
   @@index([district])
 }
@@ -379,6 +443,13 @@ model Consultation {
   expiresAt          DateTime
   declineReason      String?            @db.VarChar(500)
   completedAt        DateTime?
+  /// Optional plain-text note written by the assigned astrologer after completion.
+  astrologerSummary  String?            @db.Text
+  astrologerSummaryUpdatedAt DateTime?
+  /// Optional Idempotency-Key for one logical customer submission. Null when the client omits it.
+  clientIdempotencyKey String?          @db.VarChar(80)
+  /// SHA-256 of the logical create payload, stored with [clientIdempotencyKey].
+  requestFingerprint   String?          @db.VarChar(64)
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
 
@@ -390,7 +461,12 @@ model Consultation {
   proposals        ConsultationProposal[]
   appointments     Appointment[]
   payments         Payment[]
+  followUpMessages ConsultationFollowUpMessage[]
+  review           ConsultationReview?
+  financialSnapshots AppointmentFinancialSnapshot[]
+  ledgerEntries      LedgerEntry[]
 
+  @@unique([customerId, clientIdempotencyKey])
   @@index([customerId])
   @@index([astrologerId])
   @@index([status])
@@ -399,6 +475,48 @@ model Consultation {
   @@index([astrologerId, status, submittedAt])
   @@index([customerId, status, submittedAt])
   @@index([status, expiresAt])
+}
+
+/// Customer star rating + optional text for one successfully completed consultation.
+/// At most one review per consultation (@@unique consultationId). Public aggregates
+/// only count rows whose consultation remains eligible (see review eligibility helper).
+model ConsultationReview {
+  id             String   @id @default(cuid())
+  consultationId String   @unique
+  customerId     String
+  /// AstrologerProfile.id of the reviewed astrologer.
+  astrologerId   String
+  /// Integer stars 1–5.
+  rating         Int
+  /// Optional plain-text body; null when empty/whitespace.
+  body           String?  @db.VarChar(1000)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  consultation Consultation     @relation(fields: [consultationId], references: [id], onDelete: Restrict)
+  customer     User             @relation("ConsultationReviewCustomer", fields: [customerId], references: [id], onDelete: Restrict)
+  astrologer   AstrologerProfile @relation(fields: [astrologerId], references: [id], onDelete: Restrict)
+
+  @@index([astrologerId, createdAt])
+  @@index([customerId])
+  @@index([astrologerId, rating])
+}
+
+/// Text-only post-session follow-up message scoped to one completed consultation.
+/// Retained permanently after the 48-hour send window expires.
+model ConsultationFollowUpMessage {
+  id             String   @id @default(cuid())
+  consultationId String
+  /// Authenticated sender; never taken from the client body.
+  senderUserId   String
+  body           String   @db.VarChar(2000)
+  createdAt      DateTime @default(now())
+
+  consultation Consultation @relation(fields: [consultationId], references: [id], onDelete: Restrict)
+  sender       User         @relation(fields: [senderUserId], references: [id], onDelete: Restrict)
+
+  @@index([consultationId, createdAt])
+  @@index([consultationId, senderUserId])
 }
 
 /// Astrologer-proposed appointment time for an ACCEPTED consultation.
@@ -443,9 +561,28 @@ model Appointment {
   currency             String            @default("LKR") @db.VarChar(8)
   reservationExpiresAt DateTime
   confirmedAt          DateTime?
+  /// Verified session facts (UTC). Set only by the lifecycle service from backend-validated events.
+  sessionStartedAt     DateTime?
+  sessionEndedAt       DateTime?
+  actualDurationSeconds Int?
+  /// Provider event ids that authorised start/end; unique so one event can never apply twice.
+  sessionStartEventId  String?           @unique
+  sessionEndEventId    String?           @unique
+  cancelledAt          DateTime?
+  cancelReason         String?           @db.VarChar(500)
+  noShowRecordedAt     DateTime?
+  /// Set when the customer is owed a full refund. NOT proof that a refund was issued.
+  refundObligation     RefundObligation?
+  refundObligationRecordedAt DateTime?
+  /// True for NO_SHOW_CUSTOMER: settlement must not proceed until an admin resolves it.
+  manualReviewRequired Boolean           @default(false)
   createdAt            DateTime          @default(now())
   updatedAt            DateTime          @updatedAt
 
+  reliabilityIncidents AstrologerReliabilityIncident[]
+  attendanceEvidence   SessionAttendanceEvidence[]
+  financialSnapshot    AppointmentFinancialSnapshot?
+  ledgerEntries        LedgerEntry[]
   consultation Consultation        @relation(fields: [consultationId], references: [id], onDelete: Restrict)
   proposal     ConsultationProposal @relation(fields: [proposalId], references: [id], onDelete: Restrict)
   customer     User                @relation("AppointmentCustomer", fields: [customerId], references: [id], onDelete: Restrict)
@@ -456,6 +593,51 @@ model Appointment {
   @@index([customerId, status])
   @@index([consultationId])
   @@index([status, reservationExpiresAt])
+}
+
+/// Provider-neutral join/leave evidence for later investigation (Phase B3-a).
+/// Inserting a row NEVER changes Appointment status, refunds, or reliability.
+/// Duplicate provider deliveries are idempotent via @@unique([provider, providerEventId]).
+model SessionAttendanceEvidence {
+  id                 String                          @id @default(cuid())
+  /// Logical provider key (e.g. future "LIVEKIT"). Not a credential.
+  provider           String                          @db.VarChar(64)
+  /// Provider-unique event id. Deduplicates retries.
+  providerEventId    String                          @db.VarChar(191)
+  /// Provider room/session id (mapped server-side to appointmentId).
+  providerRoomId     String                          @db.VarChar(191)
+  appointmentId      String
+  participantRole    SessionAttendanceParticipantRole
+  eventKind          SessionAttendanceEventKind
+  /// When the provider says the event happened (UTC).
+  providerOccurredAt DateTime
+  /// When this API accepted the verified event (UTC).
+  receivedAt         DateTime
+  /// Minimal trace only: { "adapter": "<name>" }. Never tokens, URLs, or PII.
+  sourceMeta         Json?
+  createdAt          DateTime                        @default(now())
+
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Restrict)
+
+  @@unique([provider, providerEventId])
+  @@index([appointmentId, providerOccurredAt])
+  @@index([appointmentId, receivedAt])
+  @@index([provider, providerRoomId])
+}
+
+/// Reliability incident against an astrologer (cancellation / no-show). One per appointment and type.
+model AstrologerReliabilityIncident {
+  id            String                  @id @default(cuid())
+  astrologerId  String
+  appointmentId String
+  type          ReliabilityIncidentType
+  createdAt     DateTime                @default(now())
+
+  astrologer  AstrologerProfile @relation(fields: [astrologerId], references: [id], onDelete: Restrict)
+  appointment Appointment       @relation(fields: [appointmentId], references: [id], onDelete: Restrict)
+
+  @@unique([appointmentId, type])
+  @@index([astrologerId, createdAt])
 }
 
 model Payment {
@@ -473,6 +655,8 @@ model Payment {
   appointment  Appointment      @relation(fields: [appointmentId], references: [id], onDelete: Restrict)
   consultation Consultation     @relation(fields: [consultationId], references: [id], onDelete: Restrict)
   attempts     PaymentAttempt[]
+  financialSnapshot AppointmentFinancialSnapshot?
+  ledgerEntries     LedgerEntry[]
 
   @@index([consultationId])
   @@index([status])
@@ -496,7 +680,7 @@ model PaymentAttempt {
   @@index([status])
 }
 
-/// Private object metadata only — bytes live in R2 (integration later).
+/// Private object metadata. Bytes live in object storage, never in MySQL.
 model File {
   id               String       @id @default(cuid())
   provider         FileProvider @default(CLOUDFLARE_R2)
@@ -521,7 +705,7 @@ model File {
 model ConsultationFile {
   id             String               @id @default(cuid())
   consultationId String
-  fileId         String
+  fileId         String               @unique
   type           ConsultationFileType
   sortOrder      Int                  @default(0)
   createdAt      DateTime             @default(now())
@@ -531,7 +715,6 @@ model ConsultationFile {
 
   @@unique([consultationId, fileId])
   @@index([consultationId])
-  @@index([fileId])
 }
 
 model AuditLog {
@@ -549,6 +732,27 @@ model AuditLog {
 
   @@index([adminUserId])
   @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+/// Append-only admin correction of User.referredByUserId.
+/// Application services never update or delete these rows. Not DB-permission immutable.
+/// Does not rewrite AppointmentFinancialSnapshot / LedgerEntry / wallets.
+model ReferralAttributionCorrection {
+  id                     String   @id @default(cuid())
+  targetUserId           String
+  previousReferrerUserId String?
+  newReferrerUserId      String?
+  adminUserId            String
+  /// Mandatory human reason for the correction (trimmed, max 500).
+  reason                 String   @db.VarChar(500)
+  createdAt              DateTime @default(now())
+
+  targetUser User @relation("ReferralCorrectionTarget", fields: [targetUserId], references: [id], onDelete: Restrict)
+  admin      User @relation("ReferralCorrectionAdmin", fields: [adminUserId], references: [id], onDelete: Restrict)
+
+  @@index([targetUserId, createdAt])
+  @@index([adminUserId])
   @@index([createdAt])
 }
 
@@ -590,4 +794,291 @@ model Notification {
   @@unique([userId, type, referenceId])
   @@index([userId, createdAt])
   @@index([sentAt, createdAt])
+}
+
+/// Financial allocation snapshot for one paid, completed appointment.
+/// Phase A creates RECORDED after the 24h hold. Phase B posts ledger credits
+/// and transitions to POSTED. REVERSED means linked debit entries were appended.
+enum FinancialSnapshotStatus {
+  /// Calculation persisted; funds have not been credited to wallets/ledger.
+  RECORDED
+  /// Ledger CREDIT entries posted; user wallet available balances updated.
+  POSTED
+  /// Linked ledger DEBIT reversals posted after a refund obligation/outcome.
+  REVERSED
+}
+
+/// One authoritative financial snapshot per appointment (financial identity).
+/// Recipients and amounts are frozen at creation and must never be rewritten
+/// when referral attribution is later corrected.
+model AppointmentFinancialSnapshot {
+  id                         String                  @id @default(cuid())
+  appointmentId              String                  @unique
+  consultationId             String
+  paymentId                  String                  @unique
+  currency                   String                  @db.VarChar(8)
+  /// Authoritative gross consultation amount (Payment/Appointment amount).
+  grossAmount                Decimal                 @db.Decimal(12, 2)
+  /// Documented basis label, e.g. GROSS_CONSULTATION_AMOUNT.
+  basis                      String                  @default("GROSS_CONSULTATION_AMOUNT") @db.VarChar(64)
+
+  astrologerId               String
+  astrologerPercent          Decimal                 @db.Decimal(5, 2)
+  astrologerAmount           Decimal                 @db.Decimal(12, 2)
+
+  customerReferrerUserId     String?
+  customerReferralPercent    Decimal                 @db.Decimal(5, 2)
+  customerReferralAmount     Decimal                 @db.Decimal(12, 2)
+
+  astrologerReferrerUserId   String?
+  astrologerReferralPercent  Decimal                 @db.Decimal(5, 2)
+  astrologerReferralAmount   Decimal                 @db.Decimal(12, 2)
+
+  /// Residual share of G after astrologer + applicable referral allocations.
+  platformPercent            Decimal                 @db.Decimal(5, 2)
+  platformAmount             Decimal                 @db.Decimal(12, 2)
+
+  status                     FinancialSnapshotStatus @default(RECORDED)
+  /// Consultation completion time used as the settlement-hold clock (UTC).
+  completedAt                DateTime
+  /// completedAt + 24h settlement hold (UTC).
+  holdExpiresAt              DateTime
+  /// When ledger CREDIT entries were posted (UTC).
+  postedAt                   DateTime?
+  /// When ledger DEBIT reversals were posted (UTC).
+  reversedAt                 DateTime?
+  createdAt                  DateTime                @default(now())
+
+  appointment  Appointment       @relation(fields: [appointmentId], references: [id], onDelete: Restrict)
+  consultation Consultation      @relation(fields: [consultationId], references: [id], onDelete: Restrict)
+  payment      Payment           @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  astrologer   AstrologerProfile @relation(fields: [astrologerId], references: [id], onDelete: Restrict)
+  ledgerEntries LedgerEntry[]
+
+  @@index([consultationId])
+  @@index([astrologerId])
+  @@index([status, createdAt])
+  @@index([status, holdExpiresAt])
+  @@index([holdExpiresAt])
+  @@index([completedAt])
+}
+
+/// Category of a financial allocation derived from a snapshot.
+enum LedgerCategory {
+  ASTROLOGER_EARNING
+  CUSTOMER_REFERRAL
+  ASTROLOGER_REFERRAL
+  /// Platform residual — never credited to a user wallet.
+  PLATFORM_RESIDUAL
+}
+
+/// CREDIT posts availability; DEBIT reverses a prior CREDIT (append-only).
+enum LedgerEntryKind {
+  CREDIT
+  DEBIT
+}
+
+/// Append-only financial ledger. Corrections are additional DEBIT rows linked
+/// via reversesEntryId — originals are never updated or deleted.
+model LedgerEntry {
+  id               String         @id @default(cuid())
+  /// Stable logical key, e.g. snap:{snapshotId}:ASTROLOGER_EARNING:CREDIT
+  idempotencyKey   String         @unique @db.VarChar(191)
+  category         LedgerCategory
+  kind             LedgerEntryKind
+  /// Always non-negative; kind determines wallet sign.
+  amount           Decimal        @db.Decimal(12, 2)
+  currency         String         @db.VarChar(8)
+  /// Null only for PLATFORM_RESIDUAL (not a user wallet credit).
+  userId           String?
+  appointmentId    String
+  consultationId   String
+  paymentId        String
+  snapshotId       String
+  /// Set on DEBIT rows; uniquely identifies the CREDIT being reversed.
+  reversesEntryId  String?        @unique
+  createdAt        DateTime       @default(now())
+
+  user         User?                        @relation(fields: [userId], references: [id], onDelete: Restrict)
+  appointment  Appointment                  @relation(fields: [appointmentId], references: [id], onDelete: Restrict)
+  consultation Consultation                 @relation(fields: [consultationId], references: [id], onDelete: Restrict)
+  payment      Payment                      @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  snapshot     AppointmentFinancialSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Restrict)
+  reversesEntry LedgerEntry?                @relation("LedgerReversal", fields: [reversesEntryId], references: [id], onDelete: Restrict)
+  reversedBy    LedgerEntry?                @relation("LedgerReversal")
+
+  @@unique([snapshotId, category, kind])
+  @@index([userId, createdAt])
+  @@index([appointmentId])
+  @@index([paymentId])
+  @@index([category, kind])
+}
+
+/// Cached available balance for a user, always updated in the same transaction
+/// as ledger posts and confirmed withdrawal debits.
+/// Reconciles to ledger CREDIT − ledger DEBIT − WithdrawalDebit.
+/// Pending/approved withdrawals reserve funds but do not change this balance.
+/// Customers do not use this for spend in V1; astrologers/referrers do.
+model WalletAccount {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  currency         String   @default("LKR") @db.VarChar(8)
+  availableBalance Decimal  @default(0) @db.Decimal(14, 2)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+}
+
+/// Singleton cached platform residual balance (not a user wallet).
+model PlatformAccount {
+  id               String   @id
+  currency         String   @default("LKR") @db.VarChar(8)
+  availableBalance Decimal  @default(0) @db.Decimal(14, 2)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+/// Astrologer payout request. Reservation is the row itself while
+/// PENDING_REVIEW or APPROVED — wallet availableBalance is not reduced until PAID.
+/// Destination fields are a snapshot copied at request time.
+enum WithdrawalStatus {
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  PAID
+  /// Approved request closed without a payout, for example after a wallet shortfall.
+  CANCELLED
+}
+
+/// Which earnings a withdrawal may spend. Existing rows are astrologer earnings.
+enum WithdrawalPurpose {
+  ASTROLOGER_EARNINGS
+  CUSTOMER_REFERRAL
+}
+
+enum WithdrawalEventAction {
+  CREATED
+  APPROVED
+  REJECTED
+  PAID
+  CANCELLED
+}
+
+/// Registered payout destination. Full account number is AES-256-GCM ciphertext.
+model AstrologerBankAccount {
+  id                      String   @id @default(cuid())
+  userId                  String
+  bankName                String   @db.VarChar(120)
+  accountHolderName       String   @db.VarChar(120)
+  branchName              String   @db.VarChar(120)
+  bankCode                String?  @db.VarChar(32)
+  branchCode              String?  @db.VarChar(32)
+  /// Last four digits only, for masked display. Never the full number.
+  accountNumberLast4      String   @db.VarChar(4)
+  accountNumberCiphertext String   @db.VarChar(512)
+  accountNumberIv         String   @db.VarChar(32)
+  accountNumberTag        String   @db.VarChar(32)
+  isActive                Boolean  @default(true)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  user        User                @relation(fields: [userId], references: [id], onDelete: Restrict)
+  withdrawals WithdrawalRequest[]
+
+  @@index([userId, isActive])
+}
+
+model WithdrawalRequest {
+  id                    String           @id @default(cuid())
+  userId                String
+  bankAccountId         String
+  amount                Decimal          @db.Decimal(12, 2)
+  currency              String           @default("LKR") @db.VarChar(8)
+  status                WithdrawalStatus @default(PENDING_REVIEW)
+  /// Existing rows are astrologer earnings. Customer referral payouts are separate.
+  purpose               WithdrawalPurpose @default(ASTROLOGER_EARNINGS)
+  /// Optional client retry key. Null keys are not deduped.
+  clientIdempotencyKey  String?          @db.VarChar(80)
+
+  destinationBankName           String  @db.VarChar(120)
+  destinationAccountHolderName  String  @db.VarChar(120)
+  destinationBranchName         String  @db.VarChar(120)
+  destinationBankCode           String? @db.VarChar(32)
+  destinationBranchCode         String? @db.VarChar(32)
+  destinationAccountLast4       String  @db.VarChar(4)
+  destinationAccountCiphertext  String  @db.VarChar(512)
+  destinationAccountIv          String  @db.VarChar(32)
+  destinationAccountTag         String  @db.VarChar(32)
+
+  approvedAt            DateTime?
+  approvedByAdminId     String?
+  rejectedAt            DateTime?
+  rejectedByAdminId     String?
+  rejectionReason       String?  @db.VarChar(500)
+  cancelledAt           DateTime?
+  cancelledByAdminId    String?
+  /// Why an approved request was closed without a bank transfer.
+  cancellationReason    String?  @db.VarChar(500)
+  paidAt                DateTime?
+  paidByAdminId         String?
+  /// When the administrator recorded the confirmation (server time).
+  transferRecordedAt    DateTime?
+  /// When the bank transfer actually occurred, as supplied by the admin.
+  actualTransferredAt   DateTime?
+  transferReference     String?  @unique @db.VarChar(64)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user          User                  @relation("WithdrawalOwner", fields: [userId], references: [id], onDelete: Restrict)
+  bankAccount   AstrologerBankAccount @relation(fields: [bankAccountId], references: [id], onDelete: Restrict)
+  approvedBy    User?                 @relation("WithdrawalApprovedBy", fields: [approvedByAdminId], references: [id], onDelete: Restrict)
+  rejectedBy    User?                 @relation("WithdrawalRejectedBy", fields: [rejectedByAdminId], references: [id], onDelete: Restrict)
+  cancelledBy   User?                 @relation("WithdrawalCancelledBy", fields: [cancelledByAdminId], references: [id], onDelete: Restrict)
+  paidBy        User?                 @relation("WithdrawalPaidBy", fields: [paidByAdminId], references: [id], onDelete: Restrict)
+  debit         WithdrawalDebit?
+  events        WithdrawalEvent[]
+
+  @@unique([userId, clientIdempotencyKey])
+  @@index([userId, status, createdAt])
+  @@index([userId, purpose, status])
+  @@index([status, createdAt])
+  @@index([bankAccountId])
+}
+
+/// Immutable payout debit posted only when an admin records a confirmed transfer.
+/// Kept separate from LedgerEntry because earning rows require a consultation snapshot
+/// and must not be rewritten or reused as payouts.
+model WithdrawalDebit {
+  id                   String   @id @default(cuid())
+  /// withdrawal:{withdrawalRequestId}:DEBIT
+  idempotencyKey       String   @unique @db.VarChar(191)
+  withdrawalRequestId  String   @unique
+  userId               String
+  amount               Decimal  @db.Decimal(12, 2)
+  currency             String   @db.VarChar(8)
+  createdAt            DateTime @default(now())
+
+  withdrawalRequest WithdrawalRequest @relation(fields: [withdrawalRequestId], references: [id], onDelete: Restrict)
+  user              User               @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, createdAt])
+}
+
+model WithdrawalEvent {
+  id           String                 @id @default(cuid())
+  withdrawalId String
+  actorUserId  String
+  action       WithdrawalEventAction
+  reason       String?                @db.VarChar(500)
+  /// Safe metadata only. Never account numbers or encryption keys.
+  metadata     Json?
+  createdAt    DateTime               @default(now())
+
+  withdrawal WithdrawalRequest @relation(fields: [withdrawalId], references: [id], onDelete: Restrict)
+  actor      User              @relation("WithdrawalEventActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+
+  @@index([withdrawalId, createdAt])
+  @@index([actorUserId])
 }

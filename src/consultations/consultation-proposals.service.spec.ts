@@ -185,7 +185,11 @@ describe('ConsultationProposalsService', () => {
 
   it('3–8. surfaces lead/horizon/weekly/boundary/exception/duration failures from availability', async () => {
     for (const message of [
-      'Proposed time is outside the astrologer availability or booking horizon',
+      'Appointment must start at least 60 minutes from now',
+      'Proposed start time is in the past',
+      'Proposed date is beyond the 30-day booking horizon',
+      'Proposed time is outside the astrologer availability for that day',
+      'Astrologer has no availability on the proposed date',
       'durationMinutes must be an integer between 15 and 240',
     ]) {
       availability.assertProposedSlotEligible.mockRejectedValueOnce(
@@ -620,7 +624,7 @@ describe('ConsultationProposalsService', () => {
   });
 
   it('18. proposal JSON/date serialization uses ISO strings', () => {
-    const view = toProposalView(mockCreatedProposal() as never);
+    const view = toProposalView(mockCreatedProposal());
     expect(view.proposedStartAt).toBe(start.toISOString());
     expect(view.proposedEndAt).toBe(end.toISOString());
     expect(view.createdAt).toMatch(/Z$/);

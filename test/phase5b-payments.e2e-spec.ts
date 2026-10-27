@@ -148,16 +148,18 @@ describe('Phase 5B payments (e2e)', () => {
       .send({ serviceId: serviceRes.body.id, price: 1500 })
       .expect(201);
 
-    const weekly: Record<string, Array<{ startTime: string; endTime: string }>> =
-      {
-        monday: [{ startTime: '09:00', endTime: '17:00' }],
-        tuesday: [{ startTime: '09:00', endTime: '17:00' }],
-        wednesday: [{ startTime: '09:00', endTime: '17:00' }],
-        thursday: [{ startTime: '09:00', endTime: '17:00' }],
-        friday: [{ startTime: '09:00', endTime: '17:00' }],
-        saturday: [{ startTime: '09:00', endTime: '17:00' }],
-        sunday: [{ startTime: '09:00', endTime: '17:00' }],
-      };
+    const weekly: Record<
+      string,
+      Array<{ startTime: string; endTime: string }>
+    > = {
+      monday: [{ startTime: '09:00', endTime: '17:00' }],
+      tuesday: [{ startTime: '09:00', endTime: '17:00' }],
+      wednesday: [{ startTime: '09:00', endTime: '17:00' }],
+      thursday: [{ startTime: '09:00', endTime: '17:00' }],
+      friday: [{ startTime: '09:00', endTime: '17:00' }],
+      saturday: [{ startTime: '09:00', endTime: '17:00' }],
+      sunday: [{ startTime: '09:00', endTime: '17:00' }],
+    };
     await request(app.getHttpServer())
       .put('/astrologers/me/availability')
       .set('Authorization', `Bearer ${token}`)
@@ -175,6 +177,11 @@ describe('Phase 5B payments (e2e)', () => {
       .patch(`/admin/astrologers/${profile.id}/application`)
       .set('Authorization', `Bearer ${admin.accessToken}`)
       .send({ action: 'APPROVE' })
+      .expect(200);
+    await request(app.getHttpServer())
+      .patch('/astrologers/me/online-status')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ isOnline: true })
       .expect(200);
     const refreshed = await prisma.astrologerProfile.findUniqueOrThrow({
       where: { id: profile.id },
@@ -619,5 +626,166 @@ describe('Phase 5B payments (e2e)', () => {
       stillBlocked.body.slots as Array<{ startAt: string }>
     ).some((s) => s.startAt === ctx.slot.startAt);
     expect(stillTaken).toBe(false);
+  });
+  async function checkoutFor(
+    ctx: Awaited<ReturnType<typeof acceptedProposal>>,
+  ) {
+    const res = await request(app.getHttpServer())
+      .post(
+        `/consultations/${ctx.consultationId}/proposals/${ctx.proposalId}/checkout`,
+      )
+      .set('Authorization', `Bearer ${ctx.customerToken}`)
+      .expect(201);
+    return {
+      merchantReference: res.body.appointment.payment.latestAttempt
+        .merchantReference as string,
+      appointmentId: res.body.appointment.id as string,
+    };
+  }
+
+  async function rows(appointmentId: string) {
+    const appointment = await prisma.appointment.findUniqueOrThrow({
+      where: { id: appointmentId },
+    });
+    const payment = await prisma.payment.findUniqueOrThrow({
+      where: { appointmentId },
+    });
+    const attempts = await prisma.paymentAttempt.findMany({
+      where: { paymentId: payment.id },
+    });
+    return { appointment, payment, attempts };
+  }
+
+  it('A1: the astrologer never receives the customer payment or merchant reference; the customer still does', async () => {
+    const ctx = await acceptedProposal({
+      astroPhone: '+94776660011',
+      customerPhone: '+94776661011',
+    });
+    const { merchantReference } = await checkoutFor(ctx);
+    await request(app.getHttpServer())
+      .post('/payments/callbacks/mock')
+      .send({ merchantReference, success: true })
+      .expect(201);
+
+    const astrologerView = await request(app.getHttpServer())
+      .get(`/astrologers/me/consultations/${ctx.consultationId}`)
+      .set('Authorization', `Bearer ${ctx.astro.token}`)
+      .expect(200);
+    expect(astrologerView.body.appointment.status).toBe(
+      AppointmentStatus.CONFIRMED,
+    );
+    expect(astrologerView.body.appointment.payment).toBeNull();
+    expect(JSON.stringify(astrologerView.body)).not.toContain(
+      merchantReference,
+    );
+
+    const customerView = await request(app.getHttpServer())
+      .get(`/consultations/${ctx.consultationId}`)
+      .set('Authorization', `Bearer ${ctx.customerToken}`)
+      .expect(200);
+    expect(
+      customerView.body.appointment.payment.latestAttempt.merchantReference,
+    ).toBe(merchantReference);
+  });
+
+  it('A1: a success callback without amount/currency is completed from the server-stored checkout, and a wrong client amount is refused', async () => {
+    const ctx = await acceptedProposal({
+      astroPhone: '+94776660012',
+      customerPhone: '+94776661012',
+    });
+    const { merchantReference, appointmentId } = await checkoutFor(ctx);
+
+    await request(app.getHttpServer())
+      .post('/payments/callbacks/mock')
+      .send({ merchantReference, success: true, amount: '1.00' })
+      .expect(409);
+    expect((await rows(appointmentId)).appointment.status).toBe(
+      AppointmentStatus.PAYMENT_PENDING,
+    );
+
+    await request(app.getHttpServer())
+      .post('/payments/callbacks/mock')
+      .send({ merchantReference, success: true })
+      .expect(201);
+    const after = await rows(appointmentId);
+    expect(after.appointment.status).toBe(AppointmentStatus.CONFIRMED);
+    expect(after.payment.status).toBe(PaymentStatus.PAID);
+  });
+
+  it('A1: failure then success leaves a consistent CONFIRMED + PAID pair', async () => {
+    const ctx = await acceptedProposal({
+      astroPhone: '+94776660013',
+      customerPhone: '+94776661013',
+    });
+    const { merchantReference, appointmentId } = await checkoutFor(ctx);
+
+    const failed = await request(app.getHttpServer())
+      .post('/payments/callbacks/mock')
+      .send({ merchantReference, success: false })
+      .expect(201);
+    expect(failed.body.failed).toBe(true);
+    const mid = await rows(appointmentId);
+    expect(mid.appointment.status).toBe(AppointmentStatus.PAYMENT_PENDING);
+    expect(mid.payment.status).toBe(PaymentStatus.FAILED);
+    expect(mid.attempts.every((a) => a.status === PaymentStatus.FAILED)).toBe(
+      true,
+    );
+
+    // Repeating the failure changes nothing.
+    await request(app.getHttpServer())
+      .post('/payments/callbacks/mock')
+      .send({ merchantReference, success: false })
+      .expect(201);
+    expect((await rows(appointmentId)).payment.status).toBe(
+      PaymentStatus.FAILED,
+    );
+
+    await request(app.getHttpServer())
+      .post('/payments/callbacks/mock')
+      .send({ merchantReference, success: true })
+      .expect(201);
+    const end = await rows(appointmentId);
+    expect(end.appointment.status).toBe(AppointmentStatus.CONFIRMED);
+    expect(end.payment.status).toBe(PaymentStatus.PAID);
+    expect(end.payment.paidAt).not.toBeNull();
+    expect(end.attempts.every((a) => a.status === PaymentStatus.PAID)).toBe(
+      true,
+    );
+  });
+
+  it('A1: success then failure keeps the payment PAID and the appointment CONFIRMED', async () => {
+    const ctx = await acceptedProposal({
+      astroPhone: '+94776660014',
+      customerPhone: '+94776661014',
+    });
+    const { merchantReference, appointmentId } = await checkoutFor(ctx);
+
+    await request(app.getHttpServer())
+      .post('/payments/callbacks/mock')
+      .send({ merchantReference, success: true })
+      .expect(201);
+    const late = await request(app.getHttpServer())
+      .post('/payments/callbacks/mock')
+      .send({ merchantReference, success: false })
+      .expect(201);
+    expect(late.body.alreadyPaid).toBe(true);
+
+    const end = await rows(appointmentId);
+    expect(end.appointment.status).toBe(AppointmentStatus.CONFIRMED);
+    expect(end.payment.status).toBe(PaymentStatus.PAID);
+    expect(end.attempts.every((a) => a.status === PaymentStatus.PAID)).toBe(
+      true,
+    );
+  });
+
+  it('A1: a callback for an unknown reference or with a malformed body is rejected cleanly', async () => {
+    await request(app.getHttpServer())
+      .post('/payments/callbacks/mock')
+      .send({ merchantReference: 'wp_does_not_exist', success: true })
+      .expect(404);
+    await request(app.getHttpServer())
+      .post('/payments/callbacks/mock')
+      .send({ success: true })
+      .expect(400);
   });
 });

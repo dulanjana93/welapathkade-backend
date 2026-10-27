@@ -45,7 +45,7 @@ export class CreateConsultationDto {
 
   @ApiPropertyOptional({
     description:
-      'Optional preferred end (ISO-8601 UTC). Preference only — does not set final appointment duration.',
+      'Preferred end of the customer availability window (ISO-8601 UTC). Preference only — not consultation duration and not a reservation.',
   })
   @IsOptional()
   @IsDateString()
@@ -60,11 +60,11 @@ export class CreateConsultationDto {
   @ApiPropertyOptional({
     type: [ConsultationFileAttachmentDto],
     description:
-      'Optional kundali/voice file metadata refs (private). No public URLs.',
+      'IDs returned by POST /consultations/attachments. The server checks ownership, type, and that each file is still unused. No object keys or public URLs.',
   })
   @IsOptional()
   @IsArray()
-  @ArrayMaxSize(20)
+  @ArrayMaxSize(6)
   @ValidateNested({ each: true })
   @Type(() => ConsultationFileAttachmentDto)
   files?: ConsultationFileAttachmentDto[];

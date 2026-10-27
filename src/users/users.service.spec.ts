@@ -9,13 +9,16 @@ describe('UsersService referral rules', () => {
     },
   };
 
-  const service = new UsersService(prisma as never, { record: jest.fn() } as never);
+  const service = new UsersService(
+    prisma as never,
+    { record: jest.fn() } as never,
+  );
 
   it('rejects invalid referral codes', async () => {
     prisma.user.findUnique.mockResolvedValue(null);
-    await expect(service.resolvePublicReferrer('MISSING')).rejects.toBeInstanceOf(
-      BadRequestException,
-    );
+    await expect(
+      service.resolvePublicReferrer('MISSING'),
+    ).rejects.toBeInstanceOf(BadRequestException);
   });
 
   it('rejects non-public referrers', async () => {
@@ -24,9 +27,9 @@ describe('UsersService referral rules', () => {
       role: UserRole.ADMIN,
       status: UserStatus.ACTIVE,
     });
-    await expect(service.resolvePublicReferrer('ADMIN1')).rejects.toBeInstanceOf(
-      BadRequestException,
-    );
+    await expect(
+      service.resolvePublicReferrer('ADMIN1'),
+    ).rejects.toBeInstanceOf(BadRequestException);
   });
 
   it('accepts active public referrers', async () => {

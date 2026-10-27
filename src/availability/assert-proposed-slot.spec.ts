@@ -13,7 +13,7 @@ import {
   MIN_APPOINTMENT_DURATION_MINUTES,
 } from './availability.constants';
 import { AvailabilityService } from './availability.service';
-import { localColomboToUtc } from './availability.time';
+import { colomboDateToDbDate, localColomboToUtc } from './availability.time';
 
 describe('AvailabilityService.assertProposedSlotEligible', () => {
   const calculator = new AvailabilityCalculator();
@@ -22,14 +22,31 @@ describe('AvailabilityService.assertProposedSlotEligible', () => {
     weeklyAvailability: { findMany: jest.fn() },
     availabilityException: { findMany: jest.fn() },
   };
-  const bookingGuard = { ensureGuard: jest.fn(), withAstrologerLock: jest.fn() };
+  const bookingGuard = {
+    ensureGuard: jest.fn(),
+    withAstrologerLock: jest.fn(),
+  };
   const occupancy = { loadOccupiedIntervals: jest.fn().mockResolvedValue([]) };
+  const configState = {
+    nodeEnv: 'development' as string | undefined,
+    allowShortNotice: undefined as string | undefined,
+  };
+  const config = {
+    get: jest.fn((key: string) => {
+      if (key === 'app.nodeEnv') return configState.nodeEnv;
+      if (key === 'app.allowShortNoticeTestAppointments') {
+        return configState.allowShortNotice;
+      }
+      return undefined;
+    }),
+  };
 
   const service = new AvailabilityService(
     prisma as never,
     calculator,
     bookingGuard as never,
     occupancy as never,
+    config as never,
   );
 
   const futureMonday = DateTime.now()
@@ -43,6 +60,8 @@ describe('AvailabilityService.assertProposedSlotEligible', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    configState.nodeEnv = 'development';
+    configState.allowShortNotice = undefined;
     prisma.astrologerProfile.findUnique.mockResolvedValue({
       id: 'ap-1',
       status: AstrologerProfileStatus.ACTIVE,
@@ -60,6 +79,16 @@ describe('AvailabilityService.assertProposedSlotEligible', () => {
     prisma.availabilityException.findMany.mockResolvedValue([]);
   });
 
+  it('converts 13:45 Asia/Colombo to 08:15 UTC', () => {
+    const utc = localColomboToUtc('2026-10-11', '13:45');
+    expect(utc.toISOString()).toBe('2026-10-11T08:15:00.000Z');
+    const local = DateTime.fromJSDate(utc, { zone: 'utc' }).setZone(
+      BUSINESS_TIMEZONE,
+    );
+    expect(local.toISODate()).toBe('2026-10-11');
+    expect(local.toFormat('HH:mm')).toBe('13:45');
+  });
+
   it('accepts a start that lands on an enumerated slot', async () => {
     await expect(
       service.assertProposedSlotEligible({
@@ -70,11 +99,62 @@ describe('AvailabilityService.assertProposedSlotEligible', () => {
     ).resolves.toBeUndefined();
   });
 
-  it('3. rejects less than 1h lead', async () => {
+  it('accepts a non-grid-aligned custom start such as 10:35', async () => {
+    await expect(
+      service.assertProposedSlotEligible({
+        astrologerId: 'ap-1',
+        proposedStartAt: localColomboToUtc(dateIso, '10:35'),
+        durationMinutes: 30,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('accepts 13:35 when the weekly window covers the full duration', async () => {
+    prisma.weeklyAvailability.findMany.mockResolvedValue([
+      {
+        id: 'w1',
+        astrologerId: 'ap-1',
+        dayOfWeek: DayOfWeek.MONDAY,
+        startTime: '09:00',
+        endTime: '17:00',
+      },
+    ]);
+    await expect(
+      service.assertProposedSlotEligible({
+        astrologerId: 'ap-1',
+        proposedStartAt: localColomboToUtc(dateIso, '13:35'),
+        durationMinutes: 45,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects when duration would leave the availability window', async () => {
+    await expect(
+      service.assertProposedSlotEligible({
+        astrologerId: 'ap-1',
+        proposedStartAt: localColomboToUtc(dateIso, '11:40'),
+        durationMinutes: 30,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects conflicting occupied intervals with buffer', async () => {
+    const occupiedStart = localColomboToUtc(dateIso, '10:00');
+    const occupiedEnd = localColomboToUtc(dateIso, '10:30');
+    await expect(
+      service.assertProposedSlotEligible({
+        astrologerId: 'ap-1',
+        proposedStartAt: localColomboToUtc(dateIso, '10:35'),
+        durationMinutes: 30,
+        occupied: [{ startAt: occupiedStart, endAt: occupiedEnd }],
+      }),
+    ).rejects.toThrow(/conflicts/);
+  });
+
+  it('3. rejects less than 1h lead with a specific message', async () => {
     const soon = DateTime.now()
       .setZone(BUSINESS_TIMEZONE)
       .plus({ minutes: 30 });
-    // Align to a weekly window if needed by mocking today as Monday with open window
     prisma.weeklyAvailability.findMany.mockResolvedValue([
       {
         id: 'w1',
@@ -90,7 +170,151 @@ describe('AvailabilityService.assertProposedSlotEligible', () => {
         proposedStartAt: soon.toUTC().toJSDate(),
         durationMinutes: 30,
       }),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    ).rejects.toThrow(/at least 60 minutes from now/);
+  });
+
+  it('short-notice override: permits a start 5 minutes ahead in development', async () => {
+    configState.allowShortNotice = 'true';
+    configState.nodeEnv = 'development';
+    const now = DateTime.fromISO('2026-10-11T13:55:00', {
+      zone: BUSINESS_TIMEZONE,
+    });
+    prisma.weeklyAvailability.findMany.mockResolvedValue([
+      {
+        id: 'w1',
+        astrologerId: 'ap-1',
+        dayOfWeek: DayOfWeek.SUNDAY,
+        startTime: '09:00',
+        endTime: '17:00',
+      },
+    ]);
+    await expect(
+      service.assertProposedSlotEligible({
+        astrologerId: 'ap-1',
+        proposedStartAt: localColomboToUtc('2026-10-11', '14:00'),
+        durationMinutes: 15,
+        now: now.toUTC().toJSDate(),
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('short-notice override disabled: still requires 60 minutes in development', async () => {
+    configState.allowShortNotice = 'false';
+    configState.nodeEnv = 'development';
+    const now = DateTime.fromISO('2026-10-11T13:55:00', {
+      zone: BUSINESS_TIMEZONE,
+    });
+    prisma.weeklyAvailability.findMany.mockResolvedValue([
+      {
+        id: 'w1',
+        astrologerId: 'ap-1',
+        dayOfWeek: DayOfWeek.SUNDAY,
+        startTime: '09:00',
+        endTime: '17:00',
+      },
+    ]);
+    await expect(
+      service.assertProposedSlotEligible({
+        astrologerId: 'ap-1',
+        proposedStartAt: localColomboToUtc('2026-10-11', '14:00'),
+        durationMinutes: 15,
+        now: now.toUTC().toJSDate(),
+      }),
+    ).rejects.toThrow(/at least 60 minutes from now/);
+  });
+
+  it('short-notice override ignored when NODE_ENV is production-like at runtime', async () => {
+    configState.allowShortNotice = 'true';
+    configState.nodeEnv = 'production';
+    const now = DateTime.fromISO('2026-10-11T13:55:00', {
+      zone: BUSINESS_TIMEZONE,
+    });
+    prisma.weeklyAvailability.findMany.mockResolvedValue([
+      {
+        id: 'w1',
+        astrologerId: 'ap-1',
+        dayOfWeek: DayOfWeek.SUNDAY,
+        startTime: '09:00',
+        endTime: '17:00',
+      },
+    ]);
+    await expect(
+      service.assertProposedSlotEligible({
+        astrologerId: 'ap-1',
+        proposedStartAt: localColomboToUtc('2026-10-11', '14:00'),
+        durationMinutes: 15,
+        now: now.toUTC().toJSDate(),
+      }),
+    ).rejects.toThrow(/at least 60 minutes from now/);
+  });
+
+  it('accepts a same-day custom start more than 60 minutes ahead', async () => {
+    const now = DateTime.fromISO('2026-10-11T13:41:00', {
+      zone: BUSINESS_TIMEZONE,
+    });
+    prisma.weeklyAvailability.findMany.mockResolvedValue([
+      {
+        id: 'w1',
+        astrologerId: 'ap-1',
+        dayOfWeek: DayOfWeek.SUNDAY,
+        startTime: '09:00',
+        endTime: '17:00',
+      },
+    ]);
+    await expect(
+      service.assertProposedSlotEligible({
+        astrologerId: 'ap-1',
+        proposedStartAt: localColomboToUtc('2026-10-11', '14:45'),
+        durationMinutes: 15,
+        now: now.toUTC().toJSDate(),
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects the reproduction case: same-day 13:45 when now is 13:41', async () => {
+    const now = DateTime.fromISO('2026-10-11T13:41:00', {
+      zone: BUSINESS_TIMEZONE,
+    });
+    prisma.weeklyAvailability.findMany.mockResolvedValue([
+      {
+        id: 'w1',
+        astrologerId: 'ap-1',
+        dayOfWeek: DayOfWeek.SUNDAY,
+        startTime: '09:00',
+        endTime: '17:00',
+      },
+    ]);
+    await expect(
+      service.assertProposedSlotEligible({
+        astrologerId: 'ap-1',
+        proposedStartAt: localColomboToUtc('2026-10-11', '13:45'),
+        durationMinutes: 15,
+        now: now.toUTC().toJSDate(),
+      }),
+    ).rejects.toThrow(/at least 60 minutes from now/);
+  });
+
+  it('rejects a past start time with a specific message', async () => {
+    const now = DateTime.fromISO('2026-10-11T14:00:00', {
+      zone: BUSINESS_TIMEZONE,
+    });
+    prisma.weeklyAvailability.findMany.mockResolvedValue([
+      {
+        id: 'w1',
+        astrologerId: 'ap-1',
+        dayOfWeek: DayOfWeek.SUNDAY,
+        startTime: '09:00',
+        endTime: '17:00',
+      },
+    ]);
+    await expect(
+      service.assertProposedSlotEligible({
+        astrologerId: 'ap-1',
+        proposedStartAt: localColomboToUtc('2026-10-11', '13:45'),
+        durationMinutes: 15,
+        now: now.toUTC().toJSDate(),
+      }),
+    ).rejects.toThrow(/in the past/);
   });
 
   it('4. rejects beyond 30-day horizon', async () => {
@@ -115,7 +339,7 @@ describe('AvailabilityService.assertProposedSlotEligible', () => {
         proposedStartAt: localColomboToUtc(farIso, '10:00'),
         durationMinutes: 30,
       }),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    ).rejects.toThrow(/booking horizon/);
   });
 
   it('5. rejects outside weekly availability', async () => {
@@ -125,18 +349,18 @@ describe('AvailabilityService.assertProposedSlotEligible', () => {
         proposedStartAt: localColomboToUtc(dateIso, '14:00'),
         durationMinutes: 30,
       }),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    ).rejects.toThrow(/outside the astrologer availability/);
   });
 
   it('6. rejects crossing availability boundary', async () => {
-    // 11:45 + 30m = 12:15 would cross 12:00 end — slot enum won't include it
+    // 11:45 + 30m = 12:15 would cross 12:00 end
     await expect(
       service.assertProposedSlotEligible({
         astrologerId: 'ap-1',
         proposedStartAt: localColomboToUtc(dateIso, '11:45'),
         durationMinutes: 30,
       }),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    ).rejects.toThrow(/outside the astrologer availability/);
   });
 
   it('7. rejects unavailable exception', async () => {
@@ -144,7 +368,7 @@ describe('AvailabilityService.assertProposedSlotEligible', () => {
       {
         id: 'e1',
         astrologerId: 'ap-1',
-        date: new Date(`${dateIso}T00:00:00.000Z`),
+        date: colomboDateToDbDate(dateIso),
         type: AvailabilityExceptionType.UNAVAILABLE,
         startTime: null,
         endTime: null,
@@ -159,7 +383,7 @@ describe('AvailabilityService.assertProposedSlotEligible', () => {
         proposedStartAt: validStart,
         durationMinutes: 30,
       }),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    ).rejects.toThrow(/no availability on the proposed date/);
   });
 
   it('8. rejects invalid duration', async () => {

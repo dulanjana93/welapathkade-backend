@@ -1,8 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import {
-  INestApplication,
-  ValidationPipe,
-} from '@nestjs/common';
+import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { DateTime } from 'luxon';
@@ -258,7 +255,10 @@ describe('Phase 3 Availability (e2e)', () => {
     });
 
     // Use near-future Colombo weekdays so lead/horizon rules don't wipe fixtures.
-    const base = DateTime.now().setZone('Asia/Colombo').plus({ days: 3 }).startOf('day');
+    const base = DateTime.now()
+      .setZone('Asia/Colombo')
+      .plus({ days: 3 })
+      .startOf('day');
     // Find a Friday and following Saturday within horizon
     let friday = base;
     while (friday.weekday !== 5) {
@@ -346,7 +346,9 @@ describe('Phase 3 Availability (e2e)', () => {
       .expect(200);
 
     const dates = new Set(
-      (slots.body.slots as Array<{ localDate: string }>).map((s) => s.localDate),
+      (slots.body.slots as Array<{ localDate: string }>).map(
+        (s) => s.localDate,
+      ),
     );
     expect(dates.has(fridayIso)).toBe(false);
     expect(dates.has(saturdayIso)).toBe(true);

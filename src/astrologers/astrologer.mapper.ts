@@ -19,6 +19,12 @@ export type AstrologerServicePublicView = {
   status: AstrologerServiceStatus;
 };
 
+export type RatingSummaryView = {
+  /** Null when there are no eligible reviews — never a default 5.0. */
+  averageRating: number | null;
+  reviewCount: number;
+};
+
 export type PublicAstrologerListItem = {
   id: string;
   displayName: string;
@@ -28,7 +34,10 @@ export type PublicAstrologerListItem = {
   city: string | null;
   district: string | null;
   status: AstrologerProfileStatus;
+  /** Manual presence: accepting new requests (not slot availability). */
+  isOnline: boolean;
   services: AstrologerServicePublicView[];
+  ratingSummary: RatingSummaryView;
 };
 
 export type PublicAstrologerDetail = PublicAstrologerListItem;
@@ -42,8 +51,10 @@ export type OwnAstrologerProfileView = {
   city: string | null;
   district: string | null;
   status: AstrologerProfileStatus;
+  isOnline: boolean;
   isComplete: boolean;
   isDiscoverable: boolean;
+  ratingSummary: RatingSummaryView;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -83,6 +94,10 @@ export function mapPublicServiceLink(
 export function toPublicAstrologerView(
   profile: AstrologerProfile,
   services: ServiceLink[],
+  ratingSummary: RatingSummaryView = {
+    averageRating: null,
+    reviewCount: 0,
+  },
 ): PublicAstrologerDetail {
   return {
     id: profile.id,
@@ -93,17 +108,25 @@ export function toPublicAstrologerView(
     city: profile.city,
     district: profile.district,
     status: profile.status,
+    isOnline: profile.isOnline === true,
     services: services.map(mapPublicServiceLink),
+    ratingSummary,
   };
 }
 
-export function computeProfileCompleteness(profile: AstrologerProfile): boolean {
+export function computeProfileCompleteness(
+  profile: AstrologerProfile,
+): boolean {
   return profile.displayName.trim().length >= 2;
 }
 
 export function toOwnProfileView(
   profile: AstrologerProfile,
-  options: { hasActiveService: boolean; userActive: boolean },
+  options: {
+    hasActiveService: boolean;
+    userActive: boolean;
+    ratingSummary?: RatingSummaryView;
+  },
 ): OwnAstrologerProfileView {
   const isComplete =
     computeProfileCompleteness(profile) && options.hasActiveService;
@@ -121,8 +144,13 @@ export function toOwnProfileView(
     city: profile.city,
     district: profile.district,
     status: profile.status,
+    isOnline: profile.isOnline === true,
     isComplete,
     isDiscoverable,
+    ratingSummary: options.ratingSummary ?? {
+      averageRating: null,
+      reviewCount: 0,
+    },
     createdAt: profile.createdAt,
     updatedAt: profile.updatedAt,
   };

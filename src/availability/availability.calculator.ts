@@ -112,10 +112,12 @@ export class AvailabilityCalculator {
     weekly: WeeklyAvailability[];
     exceptions: AvailabilityException[];
     now?: Date;
+    minLeadMinutes?: number;
   }): UtcWindow[] {
     const now = params.now ?? new Date();
+    const minLeadMinutes = params.minLeadMinutes ?? MIN_BOOKING_LEAD_MINUTES;
     const leadCutoff = DateTime.fromJSDate(now, { zone: 'utc' }).plus({
-      minutes: MIN_BOOKING_LEAD_MINUTES,
+      minutes: minLeadMinutes,
     });
     const horizonEnd = nowInColombo(now)
       .startOf('day')
@@ -136,7 +138,7 @@ export class AvailabilityCalculator {
     const windows: UtcWindow[] = [];
     while (cursor <= end) {
       if (cursor > horizonEnd) break;
-      const dateIso = cursor.toISODate()!;
+      const dateIso = cursor.toISODate();
       const localWindows = this.resolveLocalWindowsForDate({
         dateIso,
         weekly: params.weekly,
@@ -182,6 +184,7 @@ export class AvailabilityCalculator {
     now?: Date;
     intervalMinutes?: number;
     bufferMinutes?: number;
+    minLeadMinutes?: number;
   }): AvailableSlot[] {
     const duration = params.durationMinutes;
     const interval = params.intervalMinutes ?? SCHEDULING_INTERVAL_MINUTES;
@@ -194,6 +197,7 @@ export class AvailabilityCalculator {
       weekly: params.weekly,
       exceptions: params.exceptions,
       now: params.now,
+      minLeadMinutes: params.minLeadMinutes,
     });
 
     const slots: AvailableSlot[] = [];
@@ -206,30 +210,28 @@ export class AvailabilityCalculator {
         const slotEnd = cursor.plus({ minutes: duration }).toJSDate();
 
         const conflicts = occupied.some((occ) => {
-          const occStart = DateTime.fromJSDate(occ.startAt, { zone: 'utc' }).minus({
+          const occStart = DateTime.fromJSDate(occ.startAt, {
+            zone: 'utc',
+          }).minus({
             minutes: buffer,
           });
           const occEnd = DateTime.fromJSDate(occ.endAt, { zone: 'utc' }).plus({
             minutes: buffer,
           });
           // Overlap: existing.start < requested.end AND existing.end > requested.start
-          return (
-            occStart.toJSDate() < slotEnd && occEnd.toJSDate() > slotStart
-          );
+          return occStart.toJSDate() < slotEnd && occEnd.toJSDate() > slotStart;
         });
 
         if (!conflicts) {
-          const localStart = DateTime.fromJSDate(slotStart, { zone: 'utc' }).setZone(
-            BUSINESS_TIMEZONE,
-          );
+          const localStart = DateTime.fromJSDate(slotStart, {
+            zone: 'utc',
+          }).setZone(BUSINESS_TIMEZONE);
           slots.push({
             startAt: slotStart,
             endAt: slotEnd,
             localDate: localStart.toISODate()!,
             startTime: localStart.toFormat('HH:mm'),
-            endTime: localStart
-              .plus({ minutes: duration })
-              .toFormat('HH:mm'),
+            endTime: localStart.plus({ minutes: duration }).toFormat('HH:mm'),
           });
         }
 
@@ -255,10 +257,7 @@ export class AvailabilityCalculator {
     };
   }
 
-  intervalsOverlap(
-    a: OccupiedInterval,
-    b: OccupiedInterval,
-  ): boolean {
+  intervalsOverlap(a: OccupiedInterval, b: OccupiedInterval): boolean {
     return a.startAt < b.endAt && a.endAt > b.startAt;
   }
 

@@ -1,10 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import {
-  IsDateString,
-  IsInt,
-  Max,
-  Min,
-} from 'class-validator';
+import { IsDateString, IsInt, Max, Min } from 'class-validator';
 import {
   MAX_APPOINTMENT_DURATION_MINUTES,
   MIN_APPOINTMENT_DURATION_MINUTES,

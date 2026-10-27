@@ -19,9 +19,7 @@ export const PROPOSAL_TERMINAL_STATUSES: ReadonlySet<ProposalStatus> = new Set([
 ]);
 
 export type ProposalTransition =
-  | 'CUSTOMER_ACCEPT'
-  | 'CUSTOMER_REJECT'
-  | 'SUPERSEDE';
+  'CUSTOMER_ACCEPT' | 'CUSTOMER_REJECT' | 'SUPERSEDE';
 
 const ALLOWED: Record<
   ProposalTransition,

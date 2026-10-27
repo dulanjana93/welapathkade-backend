@@ -22,6 +22,7 @@ import {
   toDecimal,
   toMoneyString,
 } from '../common/money/money';
+import { ConsultationReviewsService } from '../consultations/consultation-reviews.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   toOwnProfileView,
@@ -35,6 +36,7 @@ import {
   UpdateAstrologerProfileDto,
   UpdateAstrologerServiceDto,
   UpdateAstrologerStatusDto,
+  UpdateOnlineStatusDto,
 } from './dto/astrologer.dto';
 
 @Injectable()
@@ -43,6 +45,7 @@ export class AstrologersService {
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
     private readonly availabilityService: AvailabilityService,
+    private readonly reviews: ConsultationReviewsService,
   ) {}
 
   assertAstrologerRole(user: User): void {
@@ -68,9 +71,11 @@ export class AstrologersService {
     if (!profile) {
       throw new NotFoundException('Astrologer profile not found');
     }
+    const ratingSummary = await this.reviews.aggregateForAstrologer(profile.id);
     return toOwnProfileView(profile, {
       hasActiveService: profile.services.length > 0,
       userActive: user.status === UserStatus.ACTIVE,
+      ratingSummary,
     });
   }
 
@@ -127,7 +132,9 @@ export class AstrologersService {
         ...(dto.experienceYears !== undefined
           ? { experienceYears: dto.experienceYears }
           : {}),
-        ...(dto.photo !== undefined ? { photo: dto.photo?.trim() || null } : {}),
+        ...(dto.photo !== undefined
+          ? { photo: dto.photo?.trim() || null }
+          : {}),
         ...(dto.city !== undefined ? { city: dto.city?.trim() || null } : {}),
         ...(dto.district !== undefined
           ? { district: dto.district?.trim() || null }
@@ -197,7 +204,9 @@ export class AstrologersService {
         });
         return toOwnServiceView(reactivated);
       }
-      throw new ConflictException('Service already assigned to this astrologer');
+      throw new ConflictException(
+        'Service already assigned to this astrologer',
+      );
     }
 
     try {
@@ -246,7 +255,9 @@ export class AstrologersService {
     let price = link.price;
     if (dto.price !== undefined) {
       price = toDecimal(dto.price);
-      if (!isPriceWithinRange(price, link.service.minPrice, link.service.maxPrice)) {
+      if (
+        !isPriceWithinRange(price, link.service.minPrice, link.service.maxPrice)
+      ) {
         throw new BadRequestException(
           `Price must be between ${link.service.minPrice.toFixed(2)} and ${link.service.maxPrice.toFixed(2)}`,
         );
@@ -344,9 +355,17 @@ export class AstrologersService {
       orderBy: { displayName: 'asc' },
     });
 
-    return profiles
-      .filter((p) => p.services.length > 0)
-      .map((p) => toPublicAstrologerView(p, p.services));
+    const visible = profiles.filter((p) => p.services.length > 0);
+    const aggregates = await this.reviews.aggregateForAstrologers(
+      visible.map((p) => p.id),
+    );
+    return visible.map((p) =>
+      toPublicAstrologerView(
+        p,
+        p.services,
+        aggregates.get(p.id) ?? { averageRating: null, reviewCount: 0 },
+      ),
+    );
   }
 
   async getDiscoverableById(id: string) {
@@ -375,7 +394,38 @@ export class AstrologersService {
       throw new NotFoundException('Astrologer not found');
     }
 
-    return toPublicAstrologerView(profile, profile.services);
+    const ratingSummary = await this.reviews.aggregateForAstrologer(profile.id);
+    return toPublicAstrologerView(profile, profile.services, ratingSummary);
+  }
+
+  listPublicReviews(astrologerId: string, page?: number, limit?: number) {
+    return this.reviews.listPublicForAstrologer(astrologerId, page, limit);
+  }
+
+  async listOwnPublicReviews(user: User, page?: number, limit?: number) {
+    this.assertAstrologerRole(user);
+    const profile = await this.requireOwnProfile(user);
+    return this.reviews.listPublicForAstrologer(profile.id, page, limit);
+  }
+
+  async getOwnRatingSummary(user: User) {
+    this.assertAstrologerRole(user);
+    const profile = await this.requireOwnProfile(user);
+    return this.reviews.aggregateForAstrologer(profile.id);
+  }
+
+  /**
+   * Persist the authenticated astrologer's Online/Offline preference.
+   * Does not alter consultations, appointments or weekly availability.
+   */
+  async updateOwnOnlineStatus(user: User, dto: UpdateOnlineStatusDto) {
+    this.assertAstrologerRole(user);
+    const profile = await this.requireOwnProfile(user);
+    const updated = await this.prisma.astrologerProfile.update({
+      where: { id: profile.id },
+      data: { isOnline: dto.isOnline === true },
+    });
+    return { id: updated.id, isOnline: updated.isOnline === true };
   }
 
   async adminUpdateStatus(id: string, dto: UpdateAstrologerStatusDto) {
@@ -388,7 +438,7 @@ export class AstrologersService {
 
     const updated = await this.prisma.astrologerProfile.update({
       where: { id },
-      data: { status: dto.status as AstrologerProfileStatus },
+      data: { status: dto.status },
       include: {
         services: {
           where: { status: AstrologerServiceStatus.ACTIVE },
@@ -531,7 +581,9 @@ export class AstrologersService {
     };
   }
 
-  async adminList(filters: { applicationStatus?: AstrologerApplicationStatus }) {
+  async adminList(filters: {
+    applicationStatus?: AstrologerApplicationStatus;
+  }) {
     const profiles = await this.prisma.astrologerProfile.findMany({
       where: {
         ...(filters.applicationStatus
@@ -579,7 +631,9 @@ export class AstrologersService {
     ip?: string | null,
   ) {
     if (dto.action === 'REJECT' && !dto.rejectionReason?.trim()) {
-      throw new BadRequestException('rejectionReason is required when rejecting');
+      throw new BadRequestException(
+        'rejectionReason is required when rejecting',
+      );
     }
 
     const result = await this.prisma.$transaction(async (tx) => {
@@ -599,7 +653,8 @@ export class AstrologersService {
       }
 
       if (
-        profile.application.status !== AstrologerApplicationStatus.PENDING_REVIEW
+        profile.application.status !==
+        AstrologerApplicationStatus.PENDING_REVIEW
       ) {
         throw new BadRequestException(
           'Only PENDING_REVIEW applications can be reviewed',
@@ -691,11 +746,19 @@ export class AstrologersService {
     };
   }
   private evaluateOnboardingReadiness(
-    profile: { displayName: string; city: string | null; district: string | null },
+    profile: {
+      displayName: string;
+      city: string | null;
+      district: string | null;
+    },
     services: Array<{
       price: Prisma.Decimal;
       status: AstrologerServiceStatus;
-      service: { status: ServiceStatus; minPrice: Prisma.Decimal; maxPrice: Prisma.Decimal };
+      service: {
+        status: ServiceStatus;
+        minPrice: Prisma.Decimal;
+        maxPrice: Prisma.Decimal;
+      };
     }>,
     availabilityReady: boolean,
   ) {
@@ -719,7 +782,13 @@ export class AstrologersService {
       errors.push('at least one active service is required');
     }
     for (const link of active) {
-      if (!isPriceWithinRange(link.price, link.service.minPrice, link.service.maxPrice)) {
+      if (
+        !isPriceWithinRange(
+          link.price,
+          link.service.minPrice,
+          link.service.maxPrice,
+        )
+      ) {
         errors.push(
           `service price must be between ${toMoneyString(link.service.minPrice)} and ${toMoneyString(link.service.maxPrice)}`,
         );

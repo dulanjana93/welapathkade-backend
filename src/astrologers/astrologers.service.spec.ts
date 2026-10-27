@@ -55,15 +55,46 @@ describe('AstrologersService', () => {
     }),
   };
 
+  const reviews = {
+    aggregateForAstrologer: jest
+      .fn()
+      .mockResolvedValue({ averageRating: null, reviewCount: 0 }),
+    aggregateForAstrologers: jest.fn().mockResolvedValue(new Map()),
+    listPublicForAstrologer: jest.fn().mockResolvedValue({
+      items: [],
+      page: 1,
+      limit: 20,
+      total: 0,
+      summary: { averageRating: null, reviewCount: 0 },
+    }),
+  };
+
   let service: AstrologersService;
 
   beforeEach(() => {
     jest.resetAllMocks();
     availabilityService.hasConfiguredAvailability.mockResolvedValue(true);
+    reviews.aggregateForAstrologer.mockResolvedValue({
+      averageRating: null,
+      reviewCount: 0,
+    });
+    reviews.aggregateForAstrologers.mockImplementation(
+      async (ids: string[]) => {
+        const map = new Map<
+          string,
+          { averageRating: number | null; reviewCount: number }
+        >();
+        for (const id of ids) {
+          map.set(id, { averageRating: null, reviewCount: 0 });
+        }
+        return map;
+      },
+    );
     service = new AstrologersService(
       prisma as never,
       { write: jest.fn() } as never,
       availabilityService as never,
+      reviews as never,
     );
   });
 
@@ -153,5 +184,9 @@ describe('AstrologersService', () => {
     expect(rows[0]).not.toHaveProperty('referralCode');
     expect(rows[0]).not.toHaveProperty('referredByUserId');
     expect(rows[0].services[0].price).toBe('1500.00');
+    expect(rows[0].ratingSummary).toEqual({
+      averageRating: null,
+      reviewCount: 0,
+    });
   });
 });

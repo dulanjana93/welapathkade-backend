@@ -10,7 +10,26 @@ const baseEnv = {
   JWT_ACCESS_SECRET: 'test-access',
   JWT_REFRESH_SECRET: 'test-refresh',
   BUSINESS_TIMEZONE: 'Asia/Colombo',
+  BANK_ACCOUNT_ENCRYPTION_KEY: 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=',
 };
+
+describe('validateEnv: NODE_ENV', () => {
+  it('is required: an unset NODE_ENV fails startup instead of defaulting to development', () => {
+    expect(() => validateEnv({ ...baseEnv, NODE_ENV: undefined })).toThrow(
+      /Environment validation failed/,
+    );
+  });
+
+  it.each(['development', 'test', 'production'])('accepts %s', (env) => {
+    expect(validateEnv({ ...baseEnv, NODE_ENV: env }).NODE_ENV).toBe(env);
+  });
+
+  it.each(['staging', 'prod', 'Production', ''])('rejects %j', (env) => {
+    expect(() => validateEnv({ ...baseEnv, NODE_ENV: env })).toThrow(
+      /Environment validation failed/,
+    );
+  });
+});
 
 describe('validateEnv: NOTIFICATIONS_FCM_PROVIDER', () => {
   it('is optional: startup validation passes when it is absent', () => {
@@ -73,5 +92,40 @@ describe('validation and runtime selection agree', () => {
       expect(resolveFcmProviderKind(raw, 'test')).toBe('noop');
       expect(resolveFcmProviderKind(raw, 'production')).toBe('noop');
     }
+  });
+});
+
+describe('validateEnv: Agora RTC', () => {
+  it('allows both Agora variables to be unset', () => {
+    expect(() => validateEnv({ ...baseEnv })).not.toThrow();
+  });
+
+  it('accepts both App ID and certificate together', () => {
+    const env = validateEnv({
+      ...baseEnv,
+      AGORA_APP_ID: '  test-app-id  ',
+      AGORA_APP_CERTIFICATE: '  test-app-cert  ',
+    });
+    expect(env.AGORA_APP_ID).toBe('test-app-id');
+    expect(env.AGORA_APP_CERTIFICATE).toBe('test-app-cert');
+  });
+
+  it('rejects when only one of the Agora variables is set', () => {
+    expect(() => validateEnv({ ...baseEnv, AGORA_APP_ID: 'only-id' })).toThrow(
+      /both be set or both unset/,
+    );
+    expect(() =>
+      validateEnv({ ...baseEnv, AGORA_APP_CERTIFICATE: 'only-cert' }),
+    ).toThrow(/both be set or both unset/);
+  });
+
+  it('treats blank Agora values as unset', () => {
+    expect(() =>
+      validateEnv({
+        ...baseEnv,
+        AGORA_APP_ID: '   ',
+        AGORA_APP_CERTIFICATE: '',
+      }),
+    ).not.toThrow();
   });
 });

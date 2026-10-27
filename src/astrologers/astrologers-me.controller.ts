@@ -6,24 +6,23 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
-import {
-  ApiBearerAuth,
-  ApiOperation,
-  ApiTags,
-} from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { UserRole, type User } from '@prisma/client';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { ListAstrologerReviewsQueryDto } from '../consultations/dto/review.dto';
 import { AstrologersService } from './astrologers.service';
 import {
   AssignAstrologerServiceDto,
   CreateAstrologerProfileDto,
   UpdateAstrologerProfileDto,
   UpdateAstrologerServiceDto,
+  UpdateOnlineStatusDto,
 } from './dto/astrologer.dto';
 
 @ApiTags('Astrologers')
@@ -40,6 +39,42 @@ export class AstrologersMeController {
     return this.astrologersService.getOwnProfile(user);
   }
 
+  @Get('reviews')
+  @ApiOperation({
+    summary:
+      'List public reviews of the current astrologer (read-only; same privacy-safe shape)',
+  })
+  listMyReviews(
+    @CurrentUser() user: User,
+    @Query() query: ListAstrologerReviewsQueryDto,
+  ) {
+    return this.astrologersService.listOwnPublicReviews(
+      user,
+      query.page,
+      query.limit,
+    );
+  }
+
+  @Get('rating-summary')
+  @ApiOperation({
+    summary: 'Get the current astrologer public average rating and review count',
+  })
+  myRatingSummary(@CurrentUser() user: User) {
+    return this.astrologersService.getOwnRatingSummary(user);
+  }
+
+  @Patch('online-status')
+  @ApiOperation({
+    summary:
+      'Set Online/Offline for accepting new consultation requests (manual preference)',
+  })
+  updateOnlineStatus(
+    @CurrentUser() user: User,
+    @Body() dto: UpdateOnlineStatusDto,
+  ) {
+    return this.astrologersService.updateOwnOnlineStatus(user, dto);
+  }
+
   @Post()
   @ApiOperation({ summary: 'Create the current astrologer profile' })
   createMe(@CurrentUser() user: User, @Body() dto: CreateAstrologerProfileDto) {
@@ -53,7 +88,9 @@ export class AstrologersMeController {
   }
 
   @Get('services')
-  @ApiOperation({ summary: 'List services configured by the current astrologer' })
+  @ApiOperation({
+    summary: 'List services configured by the current astrologer',
+  })
   listServices(@CurrentUser() user: User) {
     return this.astrologersService.listOwnServices(user);
   }

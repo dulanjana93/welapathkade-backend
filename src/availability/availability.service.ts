@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import {
   AvailabilityExceptionType,
   AstrologerProfileStatus,
@@ -14,14 +15,19 @@ import {
   type AvailabilityException,
   type WeeklyAvailability,
 } from '@prisma/client';
+import {
+  isShortNoticeTestAppointmentsEnabled,
+  resolveProposalMinLeadMinutes,
+} from '../config/short-notice-test-appointments';
 import { PrismaService } from '../prisma/prisma.service';
 import { AvailabilityCalculator } from './availability.calculator';
 import {
+  APPOINTMENT_BUFFER_MINUTES,
   BUSINESS_TIMEZONE,
   MAX_APPOINTMENT_DURATION_MINUTES,
   MAX_BOOKING_HORIZON_DAYS,
+  MAX_PREFERRED_WINDOW_MINUTES,
   MIN_APPOINTMENT_DURATION_MINUTES,
-  MIN_BOOKING_LEAD_MINUTES,
 } from './availability.constants';
 import { BookingGuardService } from './booking-guard.service';
 import { OccupancyService } from './occupancy.service';
@@ -40,9 +46,19 @@ import {
   dayEnumToKey,
   dayKeyToEnum,
   dbDateToIso,
+  nowInColombo,
+  timeToMinutes,
+  windowsOverlap,
   type DayKey,
 } from './availability.time';
 import type { OccupiedInterval } from './availability.calculator';
+
+function minutesToHhmm(total: number): string {
+  const clamped = Math.max(0, Math.min(24 * 60 - 1, total));
+  const h = Math.floor(clamped / 60);
+  const m = clamped % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
 
 @Injectable()
 export class AvailabilityService {
@@ -51,7 +67,23 @@ export class AvailabilityService {
     private readonly calculator: AvailabilityCalculator,
     private readonly bookingGuard: BookingGuardService,
     private readonly occupancy: OccupancyService,
+    private readonly config: ConfigService,
   ) {}
+
+  /** Effective proposal lead; 5 minutes only under the explicit test override. */
+  private effectiveProposalMinLeadMinutes(): number {
+    return resolveProposalMinLeadMinutes(
+      this.config.get<string>('app.allowShortNoticeTestAppointments'),
+      this.config.get<string>('app.nodeEnv'),
+    );
+  }
+
+  private shortNoticeTestAppointmentsEnabled(): boolean {
+    return isShortNoticeTestAppointmentsEnabled(
+      this.config.get<string>('app.allowShortNoticeTestAppointments'),
+      this.config.get<string>('app.nodeEnv'),
+    );
+  }
 
   async ensureOwnProfile(user: User) {
     if (user.role !== UserRole.ASTROLOGER) {
@@ -101,7 +133,7 @@ export class AvailabilityService {
     }> = [];
 
     for (const key of DAY_KEYS) {
-      const windows = (dto[key] ?? []) as WeeklyWindowInputDto[];
+      const windows = dto[key] ?? [];
       assertNoOverlaps(windows);
       for (const w of windows) {
         rows.push({
@@ -230,7 +262,9 @@ export class AvailabilityService {
             ? startTime
             : null,
         endTime:
-          type === AvailabilityExceptionType.AVAILABLE_OVERRIDE ? endTime : null,
+          type === AvailabilityExceptionType.AVAILABLE_OVERRIDE
+            ? endTime
+            : null,
         reason:
           dto.reason !== undefined
             ? dto.reason?.trim() || null
@@ -282,6 +316,9 @@ export class AvailabilityService {
       this.occupancy.loadOccupiedIntervals({ astrologerId: profile.id }),
     ]);
 
+    const minLeadMinutes = this.effectiveProposalMinLeadMinutes();
+    const shortNoticeTestAppointments =
+      this.shortNoticeTestAppointmentsEnabled();
     const slots = this.calculator.enumerateSlots({
       fromDateIso: query.from,
       toDateIso: query.to,
@@ -289,12 +326,14 @@ export class AvailabilityService {
       weekly,
       exceptions,
       occupied,
+      minLeadMinutes,
     });
 
     return {
       timezone: BUSINESS_TIMEZONE,
-      minLeadMinutes: MIN_BOOKING_LEAD_MINUTES,
+      minLeadMinutes,
       maxHorizonDays: MAX_BOOKING_HORIZON_DAYS,
+      shortNoticeTestAppointments,
       durationMinutes: duration,
       slots: slots.map((s) => ({
         startAt: s.startAt.toISOString(),
@@ -307,8 +346,11 @@ export class AvailabilityService {
   }
 
   /**
-   * Eligibility check only: preferred time must currently fall on a public slot.
-   * Does NOT reserve the slot or create an appointment.
+   * Eligibility check only for a customer preference window.
+   * Preference is NOT an appointment duration, reservation, or slot hold.
+   * Does not require exact scheduling-interval slot alignment, occupancy clearance,
+   * or the appointment min-lead rule on preferredStartAt (ranges may begin earlier
+   * today as long as the window has not already ended).
    */
   async assertPreferredSlotEligible(params: {
     astrologerId: string;
@@ -328,42 +370,118 @@ export class AvailabilityService {
       throw new BadRequestException('preferredEndAt is invalid');
     }
     if (end && end <= start) {
-      throw new BadRequestException('preferredEndAt must be after preferredStartAt');
+      throw new BadRequestException(
+        'preferredEndAt must be after preferredStartAt',
+      );
+    }
+
+    const localStart = DateTime.fromJSDate(start, { zone: 'utc' }).setZone(
+      BUSINESS_TIMEZONE,
+    );
+    if (!localStart.isValid) {
+      throw new BadRequestException('preferredStartAt is invalid');
+    }
+
+    const localEnd = end
+      ? DateTime.fromJSDate(end, { zone: 'utc' }).setZone(BUSINESS_TIMEZONE)
+      : null;
+    if (localEnd && !localEnd.isValid) {
+      throw new BadRequestException('preferredEndAt is invalid');
+    }
+    if (
+      localEnd &&
+      localEnd.startOf('day').toISODate() !== localStart.toISODate()
+    ) {
+      throw new BadRequestException(
+        'preferredEndAt must be on the same Asia/Colombo calendar day as preferredStartAt',
+      );
     }
 
     const durationMinutes = end
       ? Math.round((end.getTime() - start.getTime()) / 60_000)
-      : 30;
+      : MIN_APPOINTMENT_DURATION_MINUTES;
     if (
       durationMinutes < MIN_APPOINTMENT_DURATION_MINUTES ||
-      durationMinutes > MAX_APPOINTMENT_DURATION_MINUTES
+      durationMinutes > MAX_PREFERRED_WINDOW_MINUTES
     ) {
       throw new BadRequestException(
-        `Preferred window duration must be between ${MIN_APPOINTMENT_DURATION_MINUTES} and ${MAX_APPOINTMENT_DURATION_MINUTES} minutes`,
+        `Preferred window duration must be between ${MIN_APPOINTMENT_DURATION_MINUTES} and ${MAX_PREFERRED_WINDOW_MINUTES} minutes`,
       );
     }
 
-    const occupied = await this.occupancy.loadOccupiedIntervals({
-      astrologerId: profile.id,
-      now,
+    // Preference windows may start earlier today; reject only once the whole
+    // window is already in the past. Appointment min-lead still applies to proposals.
+    const windowEndUtc = end
+      ? DateTime.fromJSDate(end, { zone: 'utc' })
+      : DateTime.fromJSDate(start, { zone: 'utc' }).plus({
+          minutes: MIN_APPOINTMENT_DURATION_MINUTES,
+        });
+    if (windowEndUtc <= DateTime.fromJSDate(now, { zone: 'utc' })) {
+      throw new BadRequestException(
+        'Preferred time range has already ended. Choose a later range.',
+      );
+    }
+
+    const horizonEnd = nowInColombo(now)
+      .startOf('day')
+      .plus({ days: MAX_BOOKING_HORIZON_DAYS });
+    if (localStart.startOf('day') > horizonEnd) {
+      throw new BadRequestException(
+        `Preferred date is beyond the ${MAX_BOOKING_HORIZON_DAYS}-day booking horizon`,
+      );
+    }
+
+    const todayColombo = nowInColombo(now).startOf('day');
+    if (localStart.startOf('day') < todayColombo) {
+      throw new BadRequestException(
+        'Preferred date must be today or a future Asia/Colombo calendar day',
+      );
+    }
+
+    const dateIso = localStart.toISODate();
+    const [weekly, exceptions] = await Promise.all([
+      this.prisma.weeklyAvailability.findMany({
+        where: { astrologerId: profile.id },
+      }),
+      this.prisma.availabilityException.findMany({
+        where: { astrologerId: profile.id },
+      }),
+    ]);
+
+    const windows = this.calculator.resolveLocalWindowsForDate({
+      dateIso,
+      weekly,
+      exceptions,
     });
-    await this.assertStartMatchesAvailableSlot({
-      astrologerId: profile.id,
-      startAt: start,
-      durationMinutes,
-      occupied,
-      now,
-      mismatchMessage:
-        'Preferred time is outside the astrologer availability or booking horizon',
-    });
+    if (windows.length === 0) {
+      throw new BadRequestException(
+        'Astrologer has no availability on the preferred date',
+      );
+    }
+
+    const prefStart = localStart.toFormat('HH:mm');
+    const prefEnd = localEnd
+      ? localEnd.toFormat('HH:mm')
+      : minutesToHhmm(
+          timeToMinutes(prefStart) + MIN_APPOINTMENT_DURATION_MINUTES,
+        );
+
+    const overlaps = windows.some((w) =>
+      windowsOverlap(prefStart, prefEnd, w.startTime, w.endTime),
+    );
+    if (!overlaps) {
+      throw new BadRequestException(
+        'Preferred time range does not overlap the astrologer availability',
+      );
+    }
   }
 
   /**
-   * Eligibility check for an astrologer-proposed appointment slot.
+   * Eligibility check for an astrologer-proposed appointment interval.
    * Does NOT reserve the slot or create an appointment/payment.
    *
-   * Reuses AvailabilityCalculator slot enumeration (lead, horizon, weekly,
-   * exceptions, occupied-with-buffer).
+   * Validates lead, horizon, weekly/exception fit, and occupancy buffer.
+   * Start times are NOT required to align to the public slot grid.
    */
   async assertProposedSlotEligible(params: {
     astrologerId: string;
@@ -390,24 +508,28 @@ export class AvailabilityService {
       );
     }
 
-    await this.assertStartMatchesAvailableSlot({
+    const minLeadMinutes = this.effectiveProposalMinLeadMinutes();
+    await this.assertProposedIntervalEligible({
       astrologerId: profile.id,
       startAt: start,
       durationMinutes,
       occupied: params.occupied ?? [],
       now,
-      mismatchMessage:
-        'Proposed time is outside the astrologer availability or booking horizon',
+      minLeadMinutes,
     });
   }
 
-  private async assertStartMatchesAvailableSlot(params: {
+  /**
+   * Continuous-interval eligibility (no scheduling-grid alignment).
+   * Used for proposals; public slot listing may still use enumerateSlots.
+   */
+  private async assertProposedIntervalEligible(params: {
     astrologerId: string;
     startAt: Date;
     durationMinutes: number;
     occupied: OccupiedInterval[];
     now: Date;
-    mismatchMessage: string;
+    minLeadMinutes: number;
   }): Promise<void> {
     const localStart = DateTime.fromJSDate(params.startAt, {
       zone: 'utc',
@@ -415,8 +537,37 @@ export class AvailabilityService {
     if (!localStart.isValid) {
       throw new BadRequestException('Start time is invalid');
     }
-    const dateIso = localStart.toISODate()!;
 
+    const nowUtc = DateTime.fromJSDate(params.now, { zone: 'utc' });
+    const startUtc = DateTime.fromJSDate(params.startAt, { zone: 'utc' });
+    if (startUtc < nowUtc) {
+      throw new BadRequestException('Proposed start time is in the past');
+    }
+
+    const leadCutoff = nowUtc.plus({ minutes: params.minLeadMinutes });
+    if (startUtc < leadCutoff) {
+      throw new BadRequestException(
+        `Appointment must start at least ${params.minLeadMinutes} minutes from now`,
+      );
+    }
+
+    const horizonEnd = nowInColombo(params.now)
+      .startOf('day')
+      .plus({ days: MAX_BOOKING_HORIZON_DAYS });
+    if (localStart.startOf('day') > horizonEnd) {
+      throw new BadRequestException(
+        `Proposed date is beyond the ${MAX_BOOKING_HORIZON_DAYS}-day booking horizon`,
+      );
+    }
+
+    const localEnd = localStart.plus({ minutes: params.durationMinutes });
+    if (!localEnd.isValid || localEnd.toISODate() !== localStart.toISODate()) {
+      throw new BadRequestException(
+        'Proposed appointment must start and end on the same Asia/Colombo calendar day',
+      );
+    }
+
+    const dateIso = localStart.toISODate();
     const [weekly, exceptions] = await Promise.all([
       this.prisma.weeklyAvailability.findMany({
         where: { astrologerId: params.astrologerId },
@@ -426,21 +577,46 @@ export class AvailabilityService {
       }),
     ]);
 
-    const slots = this.calculator.enumerateSlots({
-      fromDateIso: dateIso,
-      toDateIso: dateIso,
-      durationMinutes: params.durationMinutes,
+    const windows = this.calculator.resolveLocalWindowsForDate({
+      dateIso,
       weekly,
       exceptions,
-      occupied: params.occupied,
-      now: params.now,
     });
+    if (windows.length === 0) {
+      throw new BadRequestException(
+        'Astrologer has no availability on the proposed date',
+      );
+    }
 
-    const matched = slots.some(
-      (s) => Math.abs(s.startAt.getTime() - params.startAt.getTime()) < 1000,
-    );
-    if (!matched) {
-      throw new BadRequestException(params.mismatchMessage);
+    const startMinutes = timeToMinutes(localStart.toFormat('HH:mm'));
+    const endMinutes = timeToMinutes(localEnd.toFormat('HH:mm'));
+    const fits = windows.some((w) => {
+      const wStart = timeToMinutes(w.startTime);
+      const wEnd = timeToMinutes(w.endTime);
+      return startMinutes >= wStart && endMinutes <= wEnd;
+    });
+    if (!fits) {
+      throw new BadRequestException(
+        'Proposed time is outside the astrologer availability for that day',
+      );
+    }
+
+    const endAt = DateTime.fromJSDate(params.startAt, { zone: 'utc' })
+      .plus({ minutes: params.durationMinutes })
+      .toJSDate();
+    const conflicts = params.occupied.some((occ) => {
+      const occStart = DateTime.fromJSDate(occ.startAt, { zone: 'utc' }).minus({
+        minutes: APPOINTMENT_BUFFER_MINUTES,
+      });
+      const occEnd = DateTime.fromJSDate(occ.endAt, { zone: 'utc' }).plus({
+        minutes: APPOINTMENT_BUFFER_MINUTES,
+      });
+      return occStart.toJSDate() < endAt && occEnd.toJSDate() > params.startAt;
+    });
+    if (conflicts) {
+      throw new BadRequestException(
+        'Proposed time conflicts with an existing appointment or reservation',
+      );
     }
   }
 
@@ -552,16 +728,18 @@ export class AvailabilityService {
     weekly: WeeklyAvailability[],
     exceptions: AvailabilityException[],
   ) {
-    const weeklyGrouped: Record<DayKey, Array<{ id: string; startTime: string; endTime: string }>> =
-      {
-        monday: [],
-        tuesday: [],
-        wednesday: [],
-        thursday: [],
-        friday: [],
-        saturday: [],
-        sunday: [],
-      };
+    const weeklyGrouped: Record<
+      DayKey,
+      Array<{ id: string; startTime: string; endTime: string }>
+    > = {
+      monday: [],
+      tuesday: [],
+      wednesday: [],
+      thursday: [],
+      friday: [],
+      saturday: [],
+      sunday: [],
+    };
 
     for (const w of weekly) {
       weeklyGrouped[dayEnumToKey(w.dayOfWeek)].push({

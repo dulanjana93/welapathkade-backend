@@ -17,9 +17,7 @@ import {
 } from 'class-validator';
 
 @ValidatorConstraint({ name: 'maxGteMin', async: false })
-export class MaxPriceGteMinPriceConstraint
-  implements ValidatorConstraintInterface
-{
+export class MaxPriceGteMinPriceConstraint implements ValidatorConstraintInterface {
   validate(_: unknown, args: ValidationArguments): boolean {
     const obj = args.object as CreateServiceDto;
     if (obj.minPrice == null || obj.maxPrice == null) {

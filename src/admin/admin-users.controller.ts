@@ -21,6 +21,7 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UpdateUserStatusDto } from '../users/dto/admin-user.dto';
+import { CorrectReferralAttributionDto } from '../users/dto/correct-referral-attribution.dto';
 import { UsersService } from '../users/users.service';
 
 @ApiTags('Admin Users')
@@ -32,13 +33,12 @@ export class AdminUsersController {
   constructor(private readonly usersService: UsersService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List platform users (optional role/status filters)' })
+  @ApiOperation({
+    summary: 'List platform users (optional role/status filters)',
+  })
   @ApiQuery({ name: 'role', required: false, enum: UserRole })
   @ApiQuery({ name: 'status', required: false, enum: UserStatus })
-  list(
-    @Query('role') role?: UserRole,
-    @Query('status') status?: UserStatus,
-  ) {
+  list(@Query('role') role?: UserRole, @Query('status') status?: UserStatus) {
     return this.usersService.adminList({ role, status });
   }
 
@@ -48,8 +48,30 @@ export class AdminUsersController {
     return this.usersService.adminGetById(id);
   }
 
+  @Patch(':id/referral-attribution')
+  @ApiOperation({
+    summary:
+      'Correct a user referrer (PUBLIC/ASTROLOGER targets only). Does not rewrite financial snapshots or ledgers.',
+  })
+  correctReferralAttribution(
+    @Param('id') id: string,
+    @Body() dto: CorrectReferralAttributionDto,
+    @CurrentUser() admin: User,
+    @Req() req: Request,
+  ) {
+    return this.usersService.adminCorrectReferralAttribution({
+      targetUserId: id,
+      referrerUserId: dto.referrerUserId,
+      reason: dto.reason,
+      actorAdminId: admin.id,
+      ip: req.ip,
+    });
+  }
+
   @Patch(':id')
-  @ApiOperation({ summary: 'Update user account status (ACTIVE/INACTIVE/SUSPENDED)' })
+  @ApiOperation({
+    summary: 'Update user account status (ACTIVE/INACTIVE/SUSPENDED)',
+  })
   updateStatus(
     @Param('id') id: string,
     @Body() dto: UpdateUserStatusDto,

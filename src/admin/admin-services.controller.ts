@@ -7,16 +7,15 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
-import {
-  ApiBearerAuth,
-  ApiOperation,
-  ApiTags,
-} from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
-import { CreateServiceDto, UpdateServiceDto } from '../services/dto/service.dto';
+import {
+  CreateServiceDto,
+  UpdateServiceDto,
+} from '../services/dto/service.dto';
 import { ServicesService } from '../services/services.service';
 
 @ApiTags('Admin Services')

@@ -5,16 +5,23 @@ import {
   ProposalStatus,
   type Prisma,
 } from '@prisma/client';
+import { SLOT_RELEASED_STATUSES } from '../payments/appointment.state';
 import { PrismaService } from '../prisma/prisma.service';
 import type { OccupiedInterval } from './availability.calculator';
 
 type Db = PrismaService | Prisma.TransactionClient;
 
+export type ExpiredReservationCounts = {
+  appointments: number;
+  payments: number;
+  attempts: number;
+};
+
 /**
  * Occupancy for slot enumeration and Confirm & Pay / proposal accept.
  *
  * Blocking:
- *  - CONFIRMED appointments
+ *  - CONFIRMED and IN_PROGRESS appointments
  *  - PAYMENT_PENDING appointments with reservationExpiresAt > now
  *  - ACCEPTED proposals that do not already have a CONFIRMED or live hold
  *
@@ -24,10 +31,16 @@ type Db = PrismaService | Prisma.TransactionClient;
 export class OccupancyService {
   constructor(private readonly prisma: PrismaService) {}
 
+  /**
+   * Flips due holds (`PAYMENT_PENDING` and `reservationExpiresAt <= now`) to
+   * `PAYMENT_EXPIRED`, then expires the payments/attempts of expired holds.
+   * Status-guarded and idempotent. The accepted proposal is NOT touched: it
+   * keeps blocking the slot and the customer may retry checkout for it.
+   */
   async expireDueReservations(
     now: Date = new Date(),
     db: Db = this.prisma,
-  ): Promise<void> {
+  ): Promise<ExpiredReservationCounts> {
     const expired = await db.appointment.updateMany({
       where: {
         status: AppointmentStatus.PAYMENT_PENDING,
@@ -35,37 +48,51 @@ export class OccupancyService {
       },
       data: { status: AppointmentStatus.PAYMENT_EXPIRED },
     });
-    if (expired.count === 0) return;
+    if (expired.count === 0) {
+      return { appointments: 0, payments: 0, attempts: 0 };
+    }
+    const healed = await this.expireOrphanedPendingPayments(now, db);
+    return { appointments: expired.count, ...healed };
+  }
 
-    const expiredAppointments = await db.appointment.findMany({
+  /**
+   * Expires `PENDING` payments (and then their `PENDING` attempts) that belong
+   * to an appointment that is already `PAYMENT_EXPIRED` and past its hold.
+   *
+   * Idempotent, and also the recovery step for a run that flipped the
+   * appointment but failed before expiring its payments: the background
+   * sweeper calls it on every run, not only when a flip just happened.
+   *
+   * The appointment condition is part of each UPDATE itself (relation filter),
+   * so a hold that is revived by a retried checkout, or a payment that was just
+   * confirmed, can never be expired by a stale id list.
+   */
+  async expireOrphanedPendingPayments(
+    now: Date = new Date(),
+    db: Db = this.prisma,
+  ): Promise<{ payments: number; attempts: number }> {
+    const appointmentExpired = {
+      status: AppointmentStatus.PAYMENT_EXPIRED,
+      reservationExpiresAt: { lte: now },
+    };
+    const payments = await db.payment.updateMany({
       where: {
-        status: AppointmentStatus.PAYMENT_EXPIRED,
-        reservationExpiresAt: { lte: now },
-        payments: { some: { status: PaymentStatus.PENDING } },
-      },
-      select: { id: true },
-    });
-    const ids = expiredAppointments.map((a) => a.id);
-    if (ids.length === 0) return;
-
-    await db.payment.updateMany({
-      where: {
-        appointmentId: { in: ids },
         status: PaymentStatus.PENDING,
+        appointment: appointmentExpired,
       },
       data: { status: PaymentStatus.EXPIRED },
     });
-    const payments = await db.payment.findMany({
-      where: { appointmentId: { in: ids }, status: PaymentStatus.EXPIRED },
-      select: { id: true },
-    });
-    await db.paymentAttempt.updateMany({
+    const attempts = await db.paymentAttempt.updateMany({
       where: {
-        paymentId: { in: payments.map((p) => p.id) },
         status: PaymentStatus.PENDING,
+        payment: {
+          status: PaymentStatus.EXPIRED,
+          appointment: appointmentExpired,
+        },
       },
       data: { status: PaymentStatus.EXPIRED },
     });
+    return { payments: payments.count, attempts: attempts.count };
   }
 
   async loadOccupiedIntervals(params: {
@@ -83,6 +110,7 @@ export class OccupancyService {
         astrologerId: params.astrologerId,
         OR: [
           { status: AppointmentStatus.CONFIRMED },
+          { status: AppointmentStatus.IN_PROGRESS },
           {
             status: AppointmentStatus.PAYMENT_PENDING,
             reservationExpiresAt: { gt: now },
@@ -101,6 +129,10 @@ export class OccupancyService {
       where: {
         status: ProposalStatus.ACCEPTED,
         consultation: { astrologerId: params.astrologerId },
+        // A cancelled / no-show / completed appointment frees its slot.
+        NOT: {
+          appointment: { is: { status: { in: SLOT_RELEASED_STATUSES } } },
+        },
         ...(params.excludeConsultationId
           ? { consultationId: { not: params.excludeConsultationId } }
           : {}),

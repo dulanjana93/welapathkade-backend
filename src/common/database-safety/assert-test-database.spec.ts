@@ -6,7 +6,8 @@ import {
 
 describe('assertTestDatabase', () => {
   const testUrl = `mysql://welapathkade:welapathkade@localhost:3307/${E2E_DATABASE_NAME}`;
-  const devUrl = 'mysql://welapathkade:welapathkade@localhost:3307/welapathkade';
+  const devUrl =
+    'mysql://welapathkade:welapathkade@localhost:3307/welapathkade';
 
   it('allows cleanup when NODE_ENV=test and database is welapathkade_test', () => {
     expect(() =>

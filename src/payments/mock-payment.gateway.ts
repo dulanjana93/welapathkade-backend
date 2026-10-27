@@ -56,7 +56,9 @@ export class MockPaymentGateway implements PaymentGateway {
     const success = parsed.success === true || parsed.success === 'true';
     const amount =
       parsed.amount != null ? toMoneyString(String(parsed.amount)) : '';
-    const currency = String(parsed.currency ?? 'LKR');
+    // No default: a missing currency stays missing so finalization can refuse
+    // it (the mock endpoint fills it from the server-stored checkout).
+    const currency = String(parsed.currency ?? '');
     const providerPaymentId = String(
       parsed.providerPaymentId ?? `mock_${merchantReference}`,
     );

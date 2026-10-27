@@ -77,6 +77,31 @@ describe('NotificationsModule provider selection', () => {
     expect(p.get<FcmProvider>(FCM_PROVIDER)).toBeInstanceOf(NoopFcmProvider);
   });
 
+  it('refuses to boot with the console provider outside development/test', async () => {
+    for (const nodeEnv of ['production', 'staging', undefined]) {
+      await expect(
+        buildWithGlobals({ provider: 'console', nodeEnv }),
+      ).rejects.toThrow(/ConsoleFcmProvider is a development-only/);
+    }
+  });
+
+  it('allows the console provider explicitly in test', async () => {
+    const m = await buildWithGlobals({ provider: 'console', nodeEnv: 'test' });
+    expect(m.get<FcmProvider>(FCM_PROVIDER)).toBeInstanceOf(ConsoleFcmProvider);
+  });
+
+  it('warns that nothing is delivered when the no-op provider runs in production', async () => {
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+    await buildWithGlobals({ nodeEnv: 'production' });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('NOT delivered'));
+    warn.mockClear();
+    await buildWithGlobals({ nodeEnv: 'test' });
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it('lets an explicit setting override the environment default', async () => {
     const m = await buildWithGlobals({
       provider: 'noop',

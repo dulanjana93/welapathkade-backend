@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  ConsultationProposal,
   ConsultationStatus,
   ProposalStatus,
   User,
@@ -221,10 +222,7 @@ export class ConsultationProposalsService {
         const freshConsultation = await tx.consultation.findUnique({
           where: { id: consultationId },
         });
-        if (
-          !freshConsultation ||
-          freshConsultation.customerId !== user.id
-        ) {
+        if (!freshConsultation || freshConsultation.customerId !== user.id) {
           throw new NotFoundException('Consultation not found');
         }
         if (freshConsultation.status !== ConsultationStatus.ACCEPTED) {
@@ -397,6 +395,26 @@ export class ConsultationProposalsService {
       orderBy: [{ createdAt: 'desc' }],
     });
     return summarizeProposals(rows);
+  }
+
+  /** Bulk variant for list views: one query, summaries keyed by consultation id. */
+  async loadProposalSummaries(consultationIds: string[]) {
+    const grouped = new Map<string, ConsultationProposal[]>();
+    if (consultationIds.length === 0) {
+      return new Map<string, ReturnType<typeof summarizeProposals>>();
+    }
+    const rows = await this.prisma.consultationProposal.findMany({
+      where: { consultationId: { in: consultationIds } },
+      orderBy: [{ createdAt: 'desc' }],
+    });
+    for (const row of rows) {
+      const list = grouped.get(row.consultationId) ?? [];
+      list.push(row);
+      grouped.set(row.consultationId, list);
+    }
+    return new Map(
+      [...grouped].map(([id, list]) => [id, summarizeProposals(list)] as const),
+    );
   }
 
   private async listProposals(consultationId: string) {

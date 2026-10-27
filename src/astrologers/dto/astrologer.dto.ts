@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { AstrologerServiceStatus } from '@prisma/client';
 import {
+  IsBoolean,
   IsEnum,
   IsInt,
   IsNotEmpty,
@@ -34,7 +35,9 @@ export class CreateAstrologerProfileDto {
   @Max(80)
   experienceYears?: number;
 
-  @ApiPropertyOptional({ description: 'Photo URL or file key (files module later)' })
+  @ApiPropertyOptional({
+    description: 'Photo URL or file key (files module later)',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(512)
@@ -139,3 +142,11 @@ export class ReviewAstrologerApplicationDto {
   rejectionReason?: string;
 }
 
+export class UpdateOnlineStatusDto {
+  @ApiProperty({
+    description:
+      'True when the astrologer is accepting new consultation requests. Independent of weekly availability and active calls.',
+  })
+  @IsBoolean()
+  isOnline!: boolean;
+}

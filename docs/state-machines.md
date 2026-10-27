@@ -129,49 +129,273 @@ Note (Phase 5A scope): proposal `EXPIRED` / `CANCELLED` transitions from the lon
 
 # 3. Appointment
 
-Initial state after customer accepts proposal (Phase 5B+ — not implemented in 5A):
+Appointment lifecycle is independent of the payment gateway's `PaymentStatus`.
+Implemented by `src/payments/appointment.state.ts` (table),
+`src/payments/appointment-lifecycle.service.ts` (guarded transitions) and
+`src/payments/session-events.ts` (verified-event contracts).
 
-PAYMENT_PENDING
+## 3.1 Transition table
 
-State machine:
+| Transition | From | To | Initiator | Notes |
+|---|---|---|---|---|
+| PAYMENT_SUCCESS | PAYMENT_PENDING | CONFIRMED | Verified payment (server-side) | Phase 5B, unchanged |
+| PAYMENT_TIMEOUT | PAYMENT_PENDING | PAYMENT_EXPIRED | Reservation expiry | Phase 5B, unchanged |
+| SESSION_START | CONFIRMED | IN_PROGRESS | Verified session event (internal) | Event must fall in the join window |
+| SESSION_END | IN_PROGRESS | COMPLETED | Verified session event (internal) | Duration derived server-side |
+| CUSTOMER_CANCEL | CONFIRMED | CANCELLED_BY_CUSTOMER | The appointment's customer | `POST /consultations/:consultationId/appointment/cancel` |
+| ASTROLOGER_CANCEL | CONFIRMED | CANCELLED_BY_ASTROLOGER | The appointment's astrologer | `POST /astrologers/me/consultations/:consultationId/appointment/cancel` |
+| CUSTOMER_NO_SHOW | CONFIRMED | NO_SHOW_CUSTOMER | Verified attendance report (internal) | Manual review required |
+| ASTROLOGER_NO_SHOW | CONFIRMED | NO_SHOW_ASTROLOGER | Verified attendance report (internal) | Refund obligation + incident |
+| BOTH_NO_SHOW | CONFIRMED | NO_SHOW_BOTH | Verified attendance report (internal) | Refund obligation |
 
-PAYMENT_PENDING
- ├── PAYMENT_SUCCESS    → CONFIRMED
- ├── PAYMENT_TIMEOUT    → PAYMENT_EXPIRED
- └── CUSTOMER_CANCEL    → CANCELLED_BY_CUSTOMER
+Every other (status, transition) pair is rejected (409). Terminal in this phase:
+PAYMENT_EXPIRED, COMPLETED, CANCELLED_BY_*, NO_SHOW_*. The legacy `CANCELLED`
+value is never written. `NO_SHOW_CUSTOMER` can only be resolved by a future
+admin review (not implemented). `DISPUTED` and `TECHNICAL_FAILURE` are
+reserved for the dispute phase and are NOT implemented.
 
-Then:
+Cancellation applies to CONFIRMED only. Cancelling a PAYMENT_PENDING hold is
+unchanged (it expires after 30 minutes).
 
-CONFIRMED
- ├── SESSION_START      → IN_PROGRESS
- ├── CUSTOMER_CANCEL    → CANCELLED_BY_CUSTOMER
- ├── ASTROLOGER_CANCEL  → CANCELLED_BY_ASTROLOGER
- ├── CUSTOMER_NO_SHOW   → NO_SHOW_CUSTOMER
- ├── ASTROLOGER_NO_SHOW → NO_SHOW_ASTROLOGER
- └── TECHNICAL_FAILURE  → TECHNICAL_FAILURE
+### 3.1.1 Cancellation timing (Phase B1)
 
-Then:
+Ordinary cancellation by either party is allowed only **strictly before the
+scheduled start** (`isCancellationAllowedAt`, evaluated under the astrologer lock
+with a fresh clock reading):
 
-IN_PROGRESS
- └── SESSION_END → COMPLETED
+| Moment (S = scheduled start) | Cancellation |
+|---|---|
+| now < S − 10 min (before the join window) | allowed |
+| S − 10 min ≤ now < S (join window open, not started) | allowed — the customer keeps the 100% refund entitlement ("even 5 minutes before") |
+| S ≤ now ≤ S + 10 min (late-grace period) | rejected, 409 |
+| now > S + 10 min (after grace) | rejected, 409 |
+| `IN_PROGRESS` or any terminal state | rejected by the state machine (409) |
 
-A completed consultation may later become:
+A rejected cancellation is checked before any write: no appointment change, no
+refund obligation, no consultation closure, no reliability incident. Repeating a
+cancellation that already succeeded stays idempotent (no new writes), even after
+the start. Elapsed time is never treated as absence: a CONFIRMED appointment
+whose start has passed stays CONFIRMED until trusted session/attendance evidence
+produces `IN_PROGRESS` or a no-show outcome. `actionability.canCancelAppointment`
+follows the same rule (false from S onwards, fails closed without a start time).
 
-DISPUTED
+Open policy question: until attendance evidence and a no-show job exist, a missed
+appointment cannot be cancelled and has no automatic resolution path.
 
-when a valid dispute is opened.
+## 3.2 Outcomes recorded on `Appointment`
 
-Possible terminal/exception states:
+| Outcome | Refund obligation | Reliability incident | Manual review | Earnings / referral |
+|---|---|---|---|---|
+| Customer cancel | `FULL_REFUND_DUE` | none | no | none |
+| Astrologer cancel | `FULL_REFUND_DUE` | `CANCELLATION` | no | none |
+| Customer no-show | none | none | `manualReviewRequired = true` | none until reviewed |
+| Astrologer no-show | `FULL_REFUND_DUE` | `NO_SHOW` | no | none |
+| Both absent | `FULL_REFUND_DUE` | none (see open decisions) | no | none |
+| Completed | none | none | no | not created in this phase |
 
-PAYMENT_EXPIRED
-CANCELLED_BY_CUSTOMER
-CANCELLED_BY_ASTROLOGER
-NO_SHOW_CUSTOMER
-NO_SHOW_ASTROLOGER
-TECHNICAL_FAILURE
-COMPLETED
+`refundObligation` records that the customer is OWED a refund. It does not mean
+money was refunded: `Payment.status` is unchanged and no refund, ledger,
+earnings or referral record is created. Refund processing is a later phase.
 
-DISPUTED is an exception state requiring Admin resolution.
+Reliability incidents live in `AstrologerReliabilityIncident`
+(unique per appointment + type, so repeats cannot duplicate them).
+
+## 3.3 Verified session events (provider integration point)
+
+No video provider is selected. Nothing produces verified events in production
+and no HTTP route accepts them.
+
+### 3.3.1 Trust boundary (Phase B3-a / B3-a.1)
+
+Runtime trust is a process-local `SessionEvidenceCapability` (WeakSet-backed)
+from `src/session-evidence`. A TypeScript cast of a plain object is rejected.
+There is **no** general-purpose mint, register, or unlock export for production
+modules. `ProviderAdapterBoundary` authentication **fails closed** until a real
+authenticator is registered (`isSessionEvidenceProviderAuthImplemented() === false`),
+so no production capability is issued today.
+
+Test-only minting lives entirely under `test/support/` and is wired through
+Jest module replacement (unit + e2e setup). Production `capability.ts` has no
+mint API and ships no Jest-only helpers in `dist`.
+
+`AppointmentLifecycleService.recordSessionStart` / `recordSessionEnd` /
+`recordNoShow` require that capability as their first argument. There is no
+generally importable `mark*Verified` helper.
+
+Join/leave **facts** are persisted by `SessionEvidenceService` into
+`SessionAttendanceEvidence` (unique on `provider + providerEventId`).
+`appointmentId` is resolved only via `RoomAppointmentMappingResolver` (fail-closed
+with zero mappings until a provider integration exists). Exact duplicate replays
+are idempotent; the same event id with conflicting immutable fields is a 409.
+`receivedAt` is not part of the duplicate identity. Inserting evidence never
+changes appointment status, refunds, manual-review flags, or reliability
+incidents, and never calls lifecycle session-start / end / no-show. Delayed
+events for already-mapped appointments are **retained** for investigation.
+
+**Persistence E2E prerequisite (test DB only, not run by this remediation):**
+apply migration `20261010140000_phase_b3a_session_attendance_evidence` to
+`welapathkade_test`, e.g. `npm run test:e2e:migrate` (uses the e2e env loader).
+Without that table the persistence case fails loudly rather than silently passing.
+
+Required before production acceptance of trusted evidence: a provider adapter
+that authenticates callbacks, maps room→appointment and participant→role inside
+`ProviderAdapterBoundary`, then records normalized events without exposing a
+public mint API.
+
+### 3.3.2 Lifecycle session transitions (unchanged rules)
+
+- Start: appointment CONFIRMED and event time within the join window.
+  Stores `sessionStartedAt` and the unique `sessionStartEventId`.
+- End: appointment IN_PROGRESS and event time >= `sessionStartedAt`. Stores
+  `sessionEndedAt`, `actualDurationSeconds` (derived, never client-supplied),
+  the unique `sessionEndEventId`, and sets `Consultation.completedAt`. No
+  minimum duration. Completion is never inferred from the scheduled duration
+  elapsing for a never-started appointment.
+- Idempotency: replaying the same event id returns the current state; a
+  different event for an already-started/completed appointment is a 409; an
+  event id can apply to only one appointment (unique columns).
+- No audio/video is recorded.
+
+### 3.3.3 Trusted production triggers (Phase 1 session completion)
+
+Until a media-provider adapter authenticates Agora (or equivalent) webhooks,
+two **server-only** paths mint `INTERNAL_LIFECYCLE` capabilities and call the
+existing lifecycle methods. Clients never POST start/end/complete and cannot
+supply timestamps or durations.
+
+| Transition | Trusted trigger | Event id |
+|---|---|---|
+| SESSION_START | First authorized `VideoSessionService.issueCredentialsForConsultation` while status is `CONFIRMED` and inside the join window | `internal:video-join:{appointmentId}` |
+| SESSION_END | `SessionCompletionSweepService` (via the expiry sweeper) when status is `IN_PROGRESS`, `sessionStartedAt` is set, and `now > endAt + VIDEO_SESSION_END_BUFFER_MINUTES` | `internal:session-hard-end:{appointmentId}` |
+
+Rules:
+
+- Leaving the Agora channel does **not** complete or cancel the appointment.
+- A never-started `CONFIRMED` appointment whose scheduled end has passed is
+  **not** marked `COMPLETED`. No-show still requires verified attendance
+  (unchanged); the sweep does not invent no-shows.
+- After `COMPLETED`, video credential issuance is rejected for both roles
+  (`isVideoJoinableStatus` / `canJoinVideoSession`).
+- Slot occupancy releases when status enters `SLOT_RELEASED_STATUSES`
+  (including `COMPLETED`), unchanged.
+
+## 3.4 Join window and no-show conditions
+
+Agreed policy: earliest join 10 minutes before the scheduled start, late
+arrival grace 10 minutes after it. Constants:
+`JOIN_WINDOW_BEFORE_START_MINUTES`, `JOIN_GRACE_AFTER_START_MINUTES`.
+
+This phase encodes the policy in the state-machine helpers only. It is NOT
+enforced end to end: there is no call provider, no join endpoint and no
+scheduler. A no-show may be recorded only when (a) the appointment is
+CONFIRMED, (b) the server clock is strictly past start + 10 minutes, and (c) a
+verified attendance report (from the future provider) states who joined. Both
+joined is rejected. Neither a timer alone nor a client assertion can produce a
+no-show.
+
+## 3.5 Concurrency
+
+Every transition runs inside `BookingGuardService.withAstrologerLock`, re-reads
+the appointment under the lock, and updates with a status guard
+(`WHERE id AND status = <expected>`), so competing transitions cannot both win.
+Cancelled, no-show and completed appointments release the astrologer's
+calendar slot (`SLOT_RELEASED_STATUSES`); IN_PROGRESS blocks it. Checkout can
+never revive an appointment in any lifecycle status
+(`CHECKOUT_BLOCKED_STATUSES`).
+
+## 3.5.1 Automated expiry (Phase B2)
+
+Two deadlines are enforced both on read (unchanged) and by a background sweeper:
+
+| Record | Deadline | Rule (single definition) |
+|---|---|---|
+| Payment hold | 30 min (`reservationExpiresAt`) | `PAYMENT_PENDING` and `reservationExpiresAt <= now` → `PAYMENT_EXPIRED`; then its `PENDING` payment and attempts → `EXPIRED` (`OccupancyService.expireDueReservations`, `expireOrphanedPendingPayments`) |
+| Consultation request | 12 h (`expiresAt`) | `PENDING` and `expiresAt <= now` → `EXPIRED` (`expirePendingConsultations`) |
+
+The boundary is inclusive for expiry (`<=`), so accept/decline/confirm, which require
+`> now`, are exactly complementary and serialize on the row.
+
+An expired payment hold does NOT release the slot and does not touch the accepted
+proposal: the proposal keeps blocking the slot and the customer may retry checkout
+for the same proposal (a new hold and attempt are created). Paid (`CONFIRMED`)
+appointments are never expired. Expiry never implies a no-show, creates no
+notification and no refund.
+
+**Sweeper** (`src/expiry`): a dependency-free timer in the API process.
+- `EXPIRY_SWEEP_ENABLED` (`true`/`false`): default on, except `NODE_ENV=test` (off).
+- `EXPIRY_SWEEP_INTERVAL_SECONDS` (5-3600): default 60.
+- One run at start-up, then every interval; never overlaps itself in a process; the
+  timer is `unref`ed and cleared on shutdown (`enableShutdownHooks`), which also
+  waits for a run in flight.
+- Failures are logged and retried on the next tick. Each step is an idempotent,
+  status-guarded UPDATE, so several instances (or overlapping runs) are safe; the
+  payment-recovery step also repairs a run that flipped a hold and failed before
+  expiring its payment.
+
+## 3.6 Consultation closure (Phase 1A)
+
+The consultation must never look actionable once its appointment is terminal.
+`AppointmentLifecycleService.closeConsultation` updates the linked
+`Consultation` in the SAME transaction (and astrologer lock) as the
+appointment transition:
+
+| Appointment outcome | Consultation status | `completedAt` |
+|---|---|---|
+| COMPLETED | COMPLETED | set (verified session end) |
+| CANCELLED_BY_CUSTOMER / CANCELLED_BY_ASTROLOGER | CANCELLED | null |
+| NO_SHOW_CUSTOMER / NO_SHOW_ASTROLOGER / NO_SHOW_BOTH | CANCELLED | null |
+
+- `CANCELLED` means "closed without a held session". It is not a claim about who
+  cancelled: the appointment status remains authoritative for the exact reason
+  (who cancelled, which participant was absent, `manualReviewRequired`).
+- `COMPLETED` is the only new consultation status; a completion cannot be
+  represented by any existing value.
+- Only an `ACCEPTED` consultation is closed (`WHERE status = ACCEPTED`). Any
+  other state is a 409 and rolls back the appointment transition; nothing is
+  overwritten silently.
+- Repeated events return early (idempotent) and never touch the consultation.
+- Refund obligations, payments, ledgers and referrals are untouched.
+- Consultation transitions: `ACCEPTED → CANCELLED` (APPOINTMENT_CLOSED) and
+  `ACCEPTED → COMPLETED` (APPOINTMENT_COMPLETED), see `consultation.state.ts`.
+- Rows closed by Phase 1 code before this change (appointment terminal,
+  consultation still ACCEPTED) are NOT backfilled here. The API still reports
+  them correctly (the stage follows the appointment and `canCheckout` is false).
+
+### Actionability in API responses
+
+Consultation detail responses (customer `GET /consultations/:id`, astrologer
+`GET /astrologers/me/consultations/:id`) include `actionability`, derived by
+`deriveConsultationActionability` (`consultation.actionability.ts`):
+
+```
+actionability: {
+  stage: REQUEST_PENDING | REQUEST_DECLINED | REQUEST_EXPIRED | REQUEST_CANCELLED
+       | AWAITING_PROPOSAL | PROPOSAL_AWAITING_CUSTOMER | AWAITING_PAYMENT
+       | CONFIRMED | IN_PROGRESS | COMPLETED
+       | CANCELLED_BY_CUSTOMER | CANCELLED_BY_ASTROLOGER
+       | NO_SHOW_CUSTOMER | NO_SHOW_ASTROLOGER | NO_SHOW_BOTH,
+  isClosed, canCancelRequest, canRespondToRequest, canPropose,
+  canRespondToProposal, canCheckout, canCancelAppointment
+}
+```
+
+A terminal appointment always yields `canCheckout: false`. No existing field was
+removed or renamed. The existing `appointment` object already carries the exact
+lifecycle status and the customer-no-show `manualReviewRequired` flag; internal
+session-event ids and attendance evidence are never exposed.
+
+### Client work still required (Flutter, not done here)
+
+- `ConsultationStatus.fromApi` falls back to `pending` for unknown values, so a
+  `COMPLETED` consultation would render as pending until `completed` is added.
+  (No production path can complete a consultation yet: no call provider.)
+- `ConsultationDetailScreen` (user app) shows Confirm & Pay whenever the
+  consultation is ACCEPTED without a confirmed appointment; it should use
+  `actionability.canCheckout` (and `canCancelRequest`, `canRespondToProposal`).
+- The astrologer app should use `canRespondToRequest` / `canPropose`.
+- Add labels for the new stages (cancelled by whom, no-show who, review pending,
+  completed, in progress).
+
 
 4. Payment
 
@@ -197,6 +421,27 @@ REFUND_PENDING
  └── REFUND_FAILURE → FAILED
 
 Payment webhook handling must be idempotent.
+
+## 4.1 Callback ordering and integrity (Phase A1)
+
+Verified gateway results are applied by `PaymentsService.finalizeVerified`:
+
+| Sequence | Result |
+|---|---|
+| Success | Requires the gateway's own `amount` and `currency` (exact decimal match with the reservation). Missing/mismatching values change nothing / fail the attempt. Appointment `CONFIRMED` and payment `PAID` are written in one transaction; if the payment cannot move to `PAID` the confirmation is rolled back. |
+| Failure | Fails only the attempt (if `PENDING`) and fails the payment once no attempt is pending, in one transaction. The appointment is untouched. Repeats are no-ops. |
+| Failure → success | The verified success is authoritative: a `FAILED` attempt/payment becomes `PAID` together with the confirmation, while the reservation hold is live. |
+| Success → failure | `PAID` is terminal. The late failure returns `alreadyPaid` and changes nothing. |
+| Success after hold expiry | Not confirmed (409); late-payment reconciliation/refund is a later phase. |
+
+Invariant: an appointment is `CONFIRMED` only together with a `PAID` payment.
+
+Development-only integrations fail closed. `MockPaymentGateway`, `ConsoleSmsSender`,
+`ConsoleFcmProvider`, mock payment callbacks and Swagger are allowed only when
+`NODE_ENV` is exactly `development` or `test`; `NODE_ENV` is required (no default),
+and an unset/unknown value is treated as production. Outside development/test,
+`CORS_ORIGINS` must be set explicitly (no wildcards, no localhost).
+Astrologer-facing responses never include payment attempts or merchant references.
 
 5. Refund
 

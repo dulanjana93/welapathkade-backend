@@ -1,8 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import {
-  INestApplication,
-  ValidationPipe,
-} from '@nestjs/common';
+import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { DateTime } from 'luxon';
@@ -153,16 +150,18 @@ describe('Phase 5A Consultation Proposals (e2e)', () => {
       })
       .expect(201);
 
-    const weekly: Record<string, Array<{ startTime: string; endTime: string }>> =
-      {
-        monday: [{ startTime: '09:00', endTime: '17:00' }],
-        tuesday: [{ startTime: '09:00', endTime: '17:00' }],
-        wednesday: [{ startTime: '09:00', endTime: '17:00' }],
-        thursday: [{ startTime: '09:00', endTime: '17:00' }],
-        friday: [{ startTime: '09:00', endTime: '17:00' }],
-        saturday: [{ startTime: '09:00', endTime: '17:00' }],
-        sunday: [{ startTime: '09:00', endTime: '17:00' }],
-      };
+    const weekly: Record<
+      string,
+      Array<{ startTime: string; endTime: string }>
+    > = {
+      monday: [{ startTime: '09:00', endTime: '17:00' }],
+      tuesday: [{ startTime: '09:00', endTime: '17:00' }],
+      wednesday: [{ startTime: '09:00', endTime: '17:00' }],
+      thursday: [{ startTime: '09:00', endTime: '17:00' }],
+      friday: [{ startTime: '09:00', endTime: '17:00' }],
+      saturday: [{ startTime: '09:00', endTime: '17:00' }],
+      sunday: [{ startTime: '09:00', endTime: '17:00' }],
+    };
     await request(app.getHttpServer())
       .put('/astrologers/me/availability')
       .set('Authorization', `Bearer ${token}`)
@@ -183,6 +182,11 @@ describe('Phase 5A Consultation Proposals (e2e)', () => {
       .set('Authorization', `Bearer ${admin.accessToken}`)
       .send({ action: 'APPROVE' })
       .expect(200);
+    await request(app.getHttpServer())
+      .patch('/astrologers/me/online-status')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ isOnline: true })
+      .expect(200);
 
     const refreshed = await prisma.astrologerProfile.findUniqueOrThrow({
       where: { id: profile.id },
@@ -196,10 +200,7 @@ describe('Phase 5A Consultation Proposals (e2e)', () => {
     };
   }
 
-  async function pickFutureSlot(
-    astrologerId: string,
-    durationMinutes = 30,
-  ) {
+  async function pickFutureSlot(astrologerId: string, durationMinutes = 30) {
     const from = DateTime.now()
       .setZone(BUSINESS_TIMEZONE)
       .plus({ days: 2 })
@@ -263,9 +264,7 @@ describe('Phase 5A Consultation Proposals (e2e)', () => {
     const proposeSlot = await pickFutureSlot(ctx.astro.profileId, 60);
 
     const created = await request(app.getHttpServer())
-      .post(
-        `/astrologers/me/consultations/${ctx.consultationId}/proposals`,
-      )
+      .post(`/astrologers/me/consultations/${ctx.consultationId}/proposals`)
       .set('Authorization', `Bearer ${ctx.astro.token}`)
       .send({
         proposedStartAt: proposeSlot.startAt,
@@ -312,9 +311,7 @@ describe('Phase 5A Consultation Proposals (e2e)', () => {
     expect(customerDetail.body.proposals).toHaveLength(1);
 
     const astroListed = await request(app.getHttpServer())
-      .get(
-        `/astrologers/me/consultations/${ctx.consultationId}/proposals`,
-      )
+      .get(`/astrologers/me/consultations/${ctx.consultationId}/proposals`)
       .set('Authorization', `Bearer ${ctx.astro.token}`)
       .expect(200);
     expect(astroListed.body[0].status).toBe(ProposalStatus.ACCEPTED);
@@ -327,9 +324,7 @@ describe('Phase 5A Consultation Proposals (e2e)', () => {
     });
     const slot1 = await pickFutureSlot(ctx.astro.profileId, 30);
     const first = await request(app.getHttpServer())
-      .post(
-        `/astrologers/me/consultations/${ctx.consultationId}/proposals`,
-      )
+      .post(`/astrologers/me/consultations/${ctx.consultationId}/proposals`)
       .set('Authorization', `Bearer ${ctx.astro.token}`)
       .send({
         proposedStartAt: slot1.startAt,
@@ -347,17 +342,21 @@ describe('Phase 5A Consultation Proposals (e2e)', () => {
     const slots = await request(app.getHttpServer())
       .get(`/astrologers/${ctx.astro.profileId}/availability/slots`)
       .query({
-        from: DateTime.now().setZone(BUSINESS_TIMEZONE).plus({ days: 2 }).toISODate(),
-        to: DateTime.now().setZone(BUSINESS_TIMEZONE).plus({ days: 6 }).toISODate(),
+        from: DateTime.now()
+          .setZone(BUSINESS_TIMEZONE)
+          .plus({ days: 2 })
+          .toISODate(),
+        to: DateTime.now()
+          .setZone(BUSINESS_TIMEZONE)
+          .plus({ days: 6 })
+          .toISODate(),
         durationMinutes: 30,
       })
       .expect(200);
     const slot2 = slots.body.slots[1] ?? slots.body.slots[0];
 
     const second = await request(app.getHttpServer())
-      .post(
-        `/astrologers/me/consultations/${ctx.consultationId}/proposals`,
-      )
+      .post(`/astrologers/me/consultations/${ctx.consultationId}/proposals`)
       .set('Authorization', `Bearer ${ctx.astro.token}`)
       .send({
         proposedStartAt: slot2.startAt,
@@ -467,17 +466,13 @@ describe('Phase 5A Consultation Proposals (e2e)', () => {
     const slot = await pickFutureSlot(ctx.astro.profileId);
 
     await request(app.getHttpServer())
-      .post(
-        `/astrologers/me/consultations/${ctx.consultationId}/proposals`,
-      )
+      .post(`/astrologers/me/consultations/${ctx.consultationId}/proposals`)
       .set('Authorization', `Bearer ${ctx.customerToken}`)
       .send({ proposedStartAt: slot.startAt, durationMinutes: 30 })
       .expect(403);
 
     const created = await request(app.getHttpServer())
-      .post(
-        `/astrologers/me/consultations/${ctx.consultationId}/proposals`,
-      )
+      .post(`/astrologers/me/consultations/${ctx.consultationId}/proposals`)
       .set('Authorization', `Bearer ${ctx.astro.token}`)
       .send({ proposedStartAt: slot.startAt, durationMinutes: 30 })
       .expect(201);
@@ -503,7 +498,10 @@ describe('Phase 5A Consultation Proposals (e2e)', () => {
     const slot = await pickFutureSlot(ctx.astro.profileId);
 
     // Cannot propose while consultation still PENDING — create a fresh pending one
-    const pendingCustomer = await registerPublic('+94775551005', 'Pending Cust');
+    const pendingCustomer = await registerPublic(
+      '+94775551005',
+      'Pending Cust',
+    );
     const pending = await request(app.getHttpServer())
       .post('/consultations')
       .set('Authorization', `Bearer ${pendingCustomer.body.accessToken}`)
@@ -515,26 +513,20 @@ describe('Phase 5A Consultation Proposals (e2e)', () => {
       .expect(201);
 
     await request(app.getHttpServer())
-      .post(
-        `/astrologers/me/consultations/${pending.body.id}/proposals`,
-      )
+      .post(`/astrologers/me/consultations/${pending.body.id}/proposals`)
       .set('Authorization', `Bearer ${ctx.astro.token}`)
       .send({ proposedStartAt: slot.startAt, durationMinutes: 30 })
       .expect(409);
 
     const first = await request(app.getHttpServer())
-      .post(
-        `/astrologers/me/consultations/${ctx.consultationId}/proposals`,
-      )
+      .post(`/astrologers/me/consultations/${ctx.consultationId}/proposals`)
       .set('Authorization', `Bearer ${ctx.astro.token}`)
       .send({ proposedStartAt: slot.startAt, durationMinutes: 30 })
       .expect(201);
 
     // Duplicate pending
     await request(app.getHttpServer())
-      .post(
-        `/astrologers/me/consultations/${ctx.consultationId}/proposals`,
-      )
+      .post(`/astrologers/me/consultations/${ctx.consultationId}/proposals`)
       .set('Authorization', `Bearer ${ctx.astro.token}`)
       .send({ proposedStartAt: slot.startAt, durationMinutes: 30 })
       .expect(409);
@@ -558,15 +550,19 @@ describe('Phase 5A Consultation Proposals (e2e)', () => {
     const slots = await request(app.getHttpServer())
       .get(`/astrologers/${ctx.astro.profileId}/availability/slots`)
       .query({
-        from: DateTime.now().setZone(BUSINESS_TIMEZONE).plus({ days: 2 }).toISODate(),
-        to: DateTime.now().setZone(BUSINESS_TIMEZONE).plus({ days: 6 }).toISODate(),
+        from: DateTime.now()
+          .setZone(BUSINESS_TIMEZONE)
+          .plus({ days: 2 })
+          .toISODate(),
+        to: DateTime.now()
+          .setZone(BUSINESS_TIMEZONE)
+          .plus({ days: 6 })
+          .toISODate(),
         durationMinutes: 30,
       })
       .expect(200);
     await request(app.getHttpServer())
-      .post(
-        `/astrologers/me/consultations/${ctx.consultationId}/proposals`,
-      )
+      .post(`/astrologers/me/consultations/${ctx.consultationId}/proposals`)
       .set('Authorization', `Bearer ${ctx.astro.token}`)
       .send({
         proposedStartAt: slots.body.slots[1].startAt,
@@ -581,21 +577,18 @@ describe('Phase 5A Consultation Proposals (e2e)', () => {
       customerPhone: '+94775551006',
     });
 
+    // Must stay below SHORT_NOTICE_TEST_LEAD_MINUTES (5) and the default 60.
     await request(app.getHttpServer())
-      .post(
-        `/astrologers/me/consultations/${ctx.consultationId}/proposals`,
-      )
+      .post(`/astrologers/me/consultations/${ctx.consultationId}/proposals`)
       .set('Authorization', `Bearer ${ctx.astro.token}`)
       .send({
-        proposedStartAt: DateTime.now().plus({ minutes: 10 }).toUTC().toISO(),
+        proposedStartAt: DateTime.now().plus({ minutes: 1 }).toUTC().toISO(),
         durationMinutes: 30,
       })
       .expect(400);
 
     await request(app.getHttpServer())
-      .post(
-        `/astrologers/me/consultations/${ctx.consultationId}/proposals`,
-      )
+      .post(`/astrologers/me/consultations/${ctx.consultationId}/proposals`)
       .set('Authorization', `Bearer ${ctx.astro.token}`)
       .send({
         proposedStartAt: DateTime.now()
@@ -608,9 +601,7 @@ describe('Phase 5A Consultation Proposals (e2e)', () => {
       .expect(400);
 
     await request(app.getHttpServer())
-      .post(
-        `/astrologers/me/consultations/${ctx.consultationId}/proposals`,
-      )
+      .post(`/astrologers/me/consultations/${ctx.consultationId}/proposals`)
       .set('Authorization', `Bearer ${ctx.astro.token}`)
       .send({
         proposedStartAt: ctx.preferredSlot.startAt,
@@ -619,9 +610,7 @@ describe('Phase 5A Consultation Proposals (e2e)', () => {
       .expect(400);
 
     await request(app.getHttpServer())
-      .post(
-        `/astrologers/me/consultations/${ctx.consultationId}/proposals`,
-      )
+      .post(`/astrologers/me/consultations/${ctx.consultationId}/proposals`)
       .set('Authorization', `Bearer ${ctx.astro.token}`)
       .send({
         proposedStartAt: ctx.preferredSlot.startAt,

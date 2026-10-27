@@ -61,10 +61,13 @@ export function luxonWeekdayToEnum(weekday: number): DayOfWeek {
     6: DayOfWeek.SATURDAY,
     7: DayOfWeek.SUNDAY,
   };
-  return map[weekday]!;
+  return map[weekday];
 }
 
-export function parseLocalTime(value: string): { hour: number; minute: number } {
+export function parseLocalTime(value: string): {
+  hour: number;
+  minute: number;
+} {
   const match = TIME_RE.exec(value.trim());
   if (!match) {
     throw new BadRequestException(
@@ -129,7 +132,9 @@ export function assertNoOverlaps(
 export function parseColomboDate(isoDate: string): DateTime {
   const dt = DateTime.fromISO(isoDate, { zone: BUSINESS_TIMEZONE });
   if (!dt.isValid || isoDate.length < 10) {
-    throw new BadRequestException(`Invalid date "${isoDate}". Expected YYYY-MM-DD`);
+    throw new BadRequestException(
+      `Invalid date "${isoDate}". Expected YYYY-MM-DD`,
+    );
   }
   return DateTime.fromObject(
     { year: dt.year, month: dt.month, day: dt.day },

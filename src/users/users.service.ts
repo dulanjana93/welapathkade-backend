@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -16,6 +17,15 @@ import { AuditService } from '../audit/audit.service';
 import { generateReferralCode } from '../common/crypto/hashing';
 import { hashPassword } from '../common/crypto/password';
 import { PrismaService } from '../prisma/prisma.service';
+
+/** Admin audit action for Phase C referral attribution corrections. */
+export const REFERRAL_ATTRIBUTION_CORRECT_ACTION =
+  'REFERRAL_ATTRIBUTION_CORRECT';
+
+const REFERRAL_CORRECTION_TARGET_ROLES: ReadonlySet<UserRole> = new Set([
+  UserRole.PUBLIC,
+  UserRole.ASTROLOGER,
+]);
 
 export type PublicUserView = {
   id: string;
@@ -433,7 +443,9 @@ export class UsersService {
     ip?: string | null;
   }) {
     if (params.id === params.actorAdminId) {
-      throw new BadRequestException('You cannot change your own account status');
+      throw new BadRequestException(
+        'You cannot change your own account status',
+      );
     }
 
     const existing = await this.getByIdOrThrow(params.id);
@@ -458,6 +470,200 @@ export class UsersService {
     });
 
     return this.toAdminUserView(updated);
+  }
+
+  /**
+   * Admin-only correction of User.referredByUserId.
+   * Future financial snapshots read the corrected graph; existing snapshots and
+   * ledger rows are never rewritten here.
+   */
+  async adminCorrectReferralAttribution(params: {
+    targetUserId: string;
+    referrerUserId: string | null;
+    reason: string;
+    actorAdminId: string;
+    ip?: string | null;
+  }) {
+    const reason = params.reason.trim();
+    if (!reason) {
+      throw new BadRequestException('Correction reason is required');
+    }
+    if (reason.length > 500) {
+      throw new BadRequestException('Correction reason is too long');
+    }
+
+    const newReferrerUserId = params.referrerUserId;
+
+    return this.prisma.$transaction(async (tx) => {
+      // Serialize referral-graph mutations across admins (cycle-safe under concurrency).
+      await this.acquireReferralCorrectionLock(tx);
+      try {
+        await this.lockUserRow(tx, params.targetUserId);
+
+        const target = await tx.user.findUnique({
+          where: { id: params.targetUserId },
+          select: {
+            id: true,
+            role: true,
+            referredByUserId: true,
+          },
+        });
+        if (!target) {
+          throw new NotFoundException('User not found');
+        }
+        if (!REFERRAL_CORRECTION_TARGET_ROLES.has(target.role)) {
+          throw new BadRequestException(
+            'Referral attribution can only be corrected for public or astrologer accounts',
+          );
+        }
+
+        const previousReferrerUserId = target.referredByUserId;
+        if (previousReferrerUserId === newReferrerUserId) {
+          throw new BadRequestException('Referral attribution is unchanged');
+        }
+
+        if (newReferrerUserId !== null) {
+          if (newReferrerUserId === target.id) {
+            throw new BadRequestException('Self-referral is not allowed');
+          }
+          await this.assertEligiblePublicReferrer(tx, newReferrerUserId);
+          await this.assertNoReferralCycle(tx, target.id, newReferrerUserId);
+        }
+
+        const claimed = await tx.user.updateMany({
+          where: {
+            id: target.id,
+            referredByUserId: previousReferrerUserId,
+          },
+          data: { referredByUserId: newReferrerUserId },
+        });
+        if (claimed.count !== 1) {
+          throw new ConflictException(
+            'Referral attribution changed concurrently; retry the correction',
+          );
+        }
+
+        const correction = await tx.referralAttributionCorrection.create({
+          data: {
+            targetUserId: target.id,
+            previousReferrerUserId,
+            newReferrerUserId,
+            adminUserId: params.actorAdminId,
+            reason,
+          },
+        });
+
+        const audit = await this.auditService.record(
+          {
+            adminUserId: params.actorAdminId,
+            action: REFERRAL_ATTRIBUTION_CORRECT_ACTION,
+            entityType: 'User',
+            entityId: target.id,
+            oldData: { referredByUserId: previousReferrerUserId },
+            newData: {
+              referredByUserId: newReferrerUserId,
+              reason,
+              correctionId: correction.id,
+            },
+            ip: params.ip,
+          },
+          tx,
+        );
+
+        return {
+          userId: target.id,
+          referredByUserId: newReferrerUserId,
+          previousReferrerUserId,
+          correctionId: correction.id,
+          auditLogId: audit.id,
+          correctedAt: correction.createdAt.toISOString(),
+          reason,
+        };
+      } finally {
+        await this.releaseReferralCorrectionLock(tx);
+      }
+    });
+  }
+
+  private async acquireReferralCorrectionLock(
+    tx: Prisma.TransactionClient,
+  ): Promise<void> {
+    const rows = await tx.$queryRaw<
+      Array<{ acquired: number | bigint | null }>
+    >`SELECT GET_LOCK('welapathkade:referral-correction', 10) AS acquired`;
+    const acquired = rows[0]?.acquired;
+    if (acquired === null || Number(acquired) !== 1) {
+      throw new ConflictException(
+        'Could not acquire referral correction lock; retry',
+      );
+    }
+  }
+
+  private async releaseReferralCorrectionLock(
+    tx: Prisma.TransactionClient,
+  ): Promise<void> {
+    await tx.$queryRaw`SELECT RELEASE_LOCK('welapathkade:referral-correction')`;
+  }
+
+  private async lockUserRow(
+    tx: Prisma.TransactionClient,
+    userId: string,
+  ): Promise<void> {
+    await tx.$queryRaw`
+      SELECT \`id\`
+      FROM \`User\`
+      WHERE \`id\` = ${userId}
+      FOR UPDATE
+    `;
+  }
+
+  private async assertEligiblePublicReferrer(
+    tx: Prisma.TransactionClient,
+    referrerUserId: string,
+  ): Promise<void> {
+    await this.lockUserRow(tx, referrerUserId);
+    const referrer = await tx.user.findUnique({
+      where: { id: referrerUserId },
+      select: { id: true, role: true, status: true },
+    });
+    if (!referrer || referrer.role !== UserRole.PUBLIC) {
+      throw new BadRequestException('Invalid referrer');
+    }
+    // Match registration eligibility: PUBLIC referrers may be ACTIVE/INACTIVE;
+    // SUSPENDED referrers are rejected.
+    if (referrer.status === UserStatus.SUSPENDED) {
+      throw new BadRequestException('Invalid referrer');
+    }
+  }
+
+  /**
+   * Walk the prospective referrer's ancestry under row locks.
+   * Detects direct and indirect cycles that would make target an ancestor.
+   */
+  private async assertNoReferralCycle(
+    tx: Prisma.TransactionClient,
+    targetUserId: string,
+    newReferrerUserId: string,
+  ): Promise<void> {
+    let current: string | null = newReferrerUserId;
+    const seen = new Set<string>();
+    while (current) {
+      if (current === targetUserId) {
+        throw new BadRequestException('Referral cycle is not allowed');
+      }
+      if (seen.has(current)) {
+        // Pre-existing cycle in the graph — refuse to extend it.
+        throw new BadRequestException('Referral cycle is not allowed');
+      }
+      seen.add(current);
+      await this.lockUserRow(tx, current);
+      const row: { referredByUserId: string | null } | null =
+        await tx.user.findUnique({
+          where: { id: current },
+          select: { referredByUserId: true },
+        });
+      current = row?.referredByUserId ?? null;
+    }
   }
 
   assertCanAuthenticate(user: User): void {

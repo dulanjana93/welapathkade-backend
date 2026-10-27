@@ -1,8 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import {
-  INestApplication,
-  ValidationPipe,
-} from '@nestjs/common';
+import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import {
@@ -144,7 +141,9 @@ describe('Phase 2 Astrologers + Services (e2e)', () => {
       })
       .expect(400);
 
-    const listed = await request(app.getHttpServer()).get('/services').expect(200);
+    const listed = await request(app.getHttpServer())
+      .get('/services')
+      .expect(200);
     expect(listed.body).toHaveLength(1);
 
     await request(app.getHttpServer())
@@ -271,7 +270,10 @@ describe('Phase 2 Astrologers + Services (e2e)', () => {
       .set('Authorization', `Bearer ${astroTokens.accessToken}`)
       .expect(200);
 
-    await request(app.getHttpServer()).get('/astrologers').expect(200).expect([]);
+    await request(app.getHttpServer())
+      .get('/astrologers')
+      .expect(200)
+      .expect([]);
 
     // Reactivate assignment after soft delete
     await request(app.getHttpServer())
@@ -286,7 +288,10 @@ describe('Phase 2 Astrologers + Services (e2e)', () => {
       .send({ status: ServiceStatus.INACTIVE })
       .expect(200);
 
-    await request(app.getHttpServer()).get('/astrologers').expect(200).expect([]);
+    await request(app.getHttpServer())
+      .get('/astrologers')
+      .expect(200)
+      .expect([]);
   });
 
   it('suspended astrologer and astrologer without services are hidden', async () => {
@@ -328,7 +333,10 @@ describe('Phase 2 Astrologers + Services (e2e)', () => {
       .expect(200);
 
     // no services yet
-    await request(app.getHttpServer()).get('/astrologers').expect(200).expect([]);
+    await request(app.getHttpServer())
+      .get('/astrologers')
+      .expect(200)
+      .expect([]);
 
     await request(app.getHttpServer())
       .post('/astrologers/me/services')
@@ -346,7 +354,10 @@ describe('Phase 2 Astrologers + Services (e2e)', () => {
       .send({ status: AstrologerProfileStatus.SUSPENDED })
       .expect(200);
 
-    await request(app.getHttpServer()).get('/astrologers').expect(200).expect([]);
+    await request(app.getHttpServer())
+      .get('/astrologers')
+      .expect(200)
+      .expect([]);
     await request(app.getHttpServer())
       .get(`/astrologers/${profile.body.id}`)
       .expect(404);

@@ -18,3 +18,6 @@ Thumbs.db
 
 .idea/
 .vscode/
+
+# Private local object storage (dev/test). Never commit customer files.
+storage/

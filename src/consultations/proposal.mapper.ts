@@ -45,7 +45,8 @@ export function summarizeProposals(proposals: ConsultationProposal[]) {
   const views = proposals.map(toProposalView);
   return {
     proposals: views,
-    pendingProposal: views.find((p) => p.status === ProposalStatus.PENDING) ?? null,
+    pendingProposal:
+      views.find((p) => p.status === ProposalStatus.PENDING) ?? null,
     acceptedProposal:
       views.find((p) => p.status === ProposalStatus.ACCEPTED) ?? null,
   };

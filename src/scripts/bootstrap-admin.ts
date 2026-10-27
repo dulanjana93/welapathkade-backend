@@ -30,8 +30,7 @@ function readArg(name: string): string | undefined {
 
 async function main() {
   const email = readArg('email');
-  const password =
-    readArg('password') ?? process.env.ADMIN_BOOTSTRAP_PASSWORD;
+  const password = readArg('password') ?? process.env.ADMIN_BOOTSTRAP_PASSWORD;
   const name = readArg('name') ?? 'Platform Admin';
   const rawPhone = readArg('phone');
 
@@ -58,7 +57,7 @@ async function main() {
       name,
       phone,
     });
-    // eslint-disable-next-line no-console
+
     console.log(
       JSON.stringify(
         {
@@ -79,7 +78,6 @@ async function main() {
 }
 
 main().catch((error: unknown) => {
-  // eslint-disable-next-line no-console
   console.error(error instanceof Error ? error.message : error);
   process.exit(1);
 });

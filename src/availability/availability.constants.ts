@@ -24,6 +24,12 @@ export const MIN_APPOINTMENT_DURATION_MINUTES = 15;
 /** Maximum consultation / proposal duration (minutes). */
 export const MAX_APPOINTMENT_DURATION_MINUTES = 240;
 
+/**
+ * Maximum preferred customer time-range length (minutes).
+ * Preference windows are not appointment durations.
+ */
+export const MAX_PREFERRED_WINDOW_MINUTES = 12 * 60;
+
 /** Confirm & Pay hold duration before the slot is released. */
 export const PAYMENT_RESERVATION_MINUTES = 30;
 

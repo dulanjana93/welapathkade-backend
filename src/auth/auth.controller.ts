@@ -1,11 +1,4 @@
-import {
-  Body,
-  Controller,
-  Get,
-  Post,
-  Req,
-  UseGuards,
-} from '@nestjs/common';
+import { Body, Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiOkResponse,
@@ -54,14 +47,16 @@ export class AuthController {
       referralCode: dto.referralCode,
       deviceId: dto.deviceId,
       fcmToken: dto.fcmToken,
-      platform: dto.platform as DevicePlatform | undefined,
+      platform: dto.platform,
       ip: req.ip,
       userAgent: req.headers['user-agent'] ?? null,
     });
   }
 
   @Post('refresh')
-  @ApiOperation({ summary: 'Rotate refresh token and issue a new access token' })
+  @ApiOperation({
+    summary: 'Rotate refresh token and issue a new access token',
+  })
   refresh(@Body() dto: RefreshTokenDto, @Req() req: Request) {
     return this.authService.refresh({
       refreshToken: dto.refreshToken,
@@ -79,7 +74,9 @@ export class AuthController {
   @Get('me')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get the authenticated user profile (includes own phone)' })
+  @ApiOperation({
+    summary: 'Get the authenticated user profile (includes own phone)',
+  })
   me(@CurrentUser() user: User) {
     return this.usersService.toAuthMeView(user);
   }
@@ -94,7 +91,7 @@ export class AuthController {
     return this.authService.upsertDevice({
       userId: user.id,
       fcmToken: dto.fcmToken,
-      platform: dto.platform as DevicePlatform,
+      platform: dto.platform,
     });
   }
 }

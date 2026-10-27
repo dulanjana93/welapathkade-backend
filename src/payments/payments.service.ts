@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Inject,
@@ -14,9 +15,9 @@ import {
   User,
   UserRole,
   type Appointment,
+  Prisma,
   type Payment,
   type PaymentAttempt,
-  type Prisma,
 } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { AvailabilityService } from '../availability/availability.service';
@@ -29,7 +30,13 @@ import { BookingGuardService } from '../availability/booking-guard.service';
 import { toMoneyString } from '../common/money/money';
 import { NotificationService } from '../notifications/notification.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { toAppointmentView, toCheckoutView } from './appointment.mapper';
+import { isMockPaymentCallbackAllowed } from '../config/runtime-safety';
+import {
+  toAppointmentView,
+  toAstrologerAppointmentView,
+  toCheckoutView,
+} from './appointment.mapper';
+import { CHECKOUT_BLOCKED_STATUSES } from './appointment.state';
 import { PAYMENT_GATEWAY, type PaymentGateway } from './payment-gateway';
 
 const appointmentInclude = {
@@ -92,6 +99,12 @@ export class PaymentsService {
           where: { proposalId },
           include: appointmentInclude,
         });
+
+        if (existing && CHECKOUT_BLOCKED_STATUSES.includes(existing.status)) {
+          throw new ConflictException(
+            `Cannot checkout an appointment in status ${existing.status}`,
+          );
+        }
 
         if (existing?.status === AppointmentStatus.CONFIRMED) {
           return toCheckoutView(existing, {
@@ -251,7 +264,8 @@ export class PaymentsService {
     return toAppointmentView(appointment);
   }
 
-  async getSummaryForConsultation(consultationId: string) {
+  /** Customer view: includes the customer's own payment and attempt. */
+  async getSummaryForCustomer(consultationId: string) {
     await this.occupancy.expireDueReservations();
     const appointment = await this.prisma.appointment.findFirst({
       where: { consultationId },
@@ -259,6 +273,42 @@ export class PaymentsService {
       orderBy: { createdAt: 'desc' },
     });
     return appointment ? toAppointmentView(appointment) : null;
+  }
+
+  /**
+   * Latest appointment per consultation for list rows (one query). Payment
+   * data is never loaded, so list summaries cannot leak payment details.
+   */
+  async listLatestAppointmentViews(consultationIds: string[]) {
+    const latest = new Map<
+      string,
+      ReturnType<typeof toAstrologerAppointmentView>
+    >();
+    if (consultationIds.length === 0) return latest;
+    await this.occupancy.expireDueReservations();
+    const rows = await this.prisma.appointment.findMany({
+      where: { consultationId: { in: consultationIds } },
+      orderBy: { createdAt: 'desc' },
+    });
+    for (const row of rows) {
+      if (!latest.has(row.consultationId)) {
+        latest.set(row.consultationId, toAstrologerAppointmentView(row));
+      }
+    }
+    return latest;
+  }
+
+  /**
+   * Astrologer view: payment data is not even loaded, so the customer's
+   * payment attempt / merchant reference can never reach an astrologer.
+   */
+  async getSummaryForAstrologer(consultationId: string) {
+    await this.occupancy.expireDueReservations();
+    const appointment = await this.prisma.appointment.findFirst({
+      where: { consultationId },
+      orderBy: { createdAt: 'desc' },
+    });
+    return appointment ? toAstrologerAppointmentView(appointment) : null;
   }
 
   async syncForCustomer(user: User, consultationId: string) {
@@ -273,12 +323,14 @@ export class PaymentsService {
     }
 
     const verified = await this.gateway.verifyByReference(reference);
-    if (verified.success) {
+    // A verified result without its own amount and currency is not enough to
+    // confirm anything: never substitute the expected values.
+    if (verified.success && verified.amount && verified.currency) {
       await this.finalizeVerified({
         merchantReference: reference,
         providerPaymentId: verified.providerPaymentId ?? `verify_${reference}`,
-        amount: verified.amount ?? view.amount,
-        currency: verified.currency ?? view.currency,
+        amount: verified.amount,
+        currency: verified.currency,
         success: true,
         raw: { source: 'sync' },
       });
@@ -291,14 +343,52 @@ export class PaymentsService {
     rawBody: string,
     headers: Record<string, string | string[] | undefined>,
   ) {
-    if (process.env.NODE_ENV === 'production') {
+    // Allowlist, not "anything but production": an unset or unknown NODE_ENV
+    // keeps mock callbacks disabled.
+    if (!isMockPaymentCallbackAllowed(process.env.NODE_ENV)) {
       throw new ForbiddenException('Mock payment callbacks are disabled');
     }
-    const notify = await this.gateway.verifyNotify(headers, rawBody);
+    let notify: Awaited<ReturnType<PaymentGateway['verifyNotify']>>;
+    try {
+      notify = await this.gateway.verifyNotify(headers, rawBody);
+    } catch {
+      throw new BadRequestException('Invalid mock payment callback body');
+    }
     return this.finalizeVerified({
-      ...notify,
+      ...(await this.withStoredCheckoutValues(notify)),
       raw: safeJson(rawBody),
     });
+  }
+
+  /**
+   * Mock gateway only. The mock stands in for a gateway that echoes what was
+   * checked out, so a successful callback that omits amount/currency gets the
+   * values stored with the checkout attempt (server-side data, never the
+   * client's). Values the callback does supply are kept and compared.
+   */
+  private async withStoredCheckoutValues<
+    T extends {
+      merchantReference: string;
+      success: boolean;
+      amount: string;
+      currency: string;
+    },
+  >(notify: T): Promise<T> {
+    if (!notify.success || (notify.amount && notify.currency)) return notify;
+    const attempt = await this.prisma.paymentAttempt.findUnique({
+      where: { merchantReference: notify.merchantReference },
+      select: { checkoutPayload: true },
+    });
+    const stored = (attempt?.checkoutPayload ?? {}) as Record<string, unknown>;
+    return {
+      ...notify,
+      amount:
+        notify.amount ||
+        (typeof stored.amount === 'string' ? stored.amount : ''),
+      currency:
+        notify.currency ||
+        (typeof stored.currency === 'string' ? stored.currency : ''),
+    };
   }
 
   async finalizeVerified(notify: {
@@ -349,26 +439,32 @@ export class PaymentsService {
       };
     }
 
+    // Callback ordering:
+    //  - success then failure: PAID is terminal; the late failure returned
+    //    above as `alreadyPaid` and changes nothing.
+    //  - failure then success: a failure only fails the attempt (and the
+    //    payment once no attempt is pending); a later verified success is
+    //    authoritative and is accepted below while the hold is live.
     if (!notify.success) {
-      await this.prisma.paymentAttempt.updateMany({
-        where: { id: attempt.id, status: PaymentStatus.PENDING },
-        data: { status: PaymentStatus.FAILED },
-      });
-      await this.prisma.payment.updateMany({
-        where: { id: payment.id, status: PaymentStatus.PENDING },
-        data: { status: PaymentStatus.FAILED },
-      });
+      await this.recordFailure(attempt.id, payment.id);
       return { failed: true };
     }
 
-    if (notify.amount && notify.amount !== expectedAmount) {
+    // A success must come with its own verified amount and currency. Nothing
+    // is changed when they are missing, so a complete callback can still land.
+    if (!notify.amount || !notify.currency) {
+      throw new BadRequestException(
+        'Verified payment result must include amount and currency',
+      );
+    }
+    if (!amountsEqual(notify.amount, expectedAmount)) {
       await this.prisma.paymentAttempt.updateMany({
         where: { id: attempt.id, status: PaymentStatus.PENDING },
         data: { status: PaymentStatus.FAILED },
       });
       throw new ConflictException('Payment amount does not match reservation');
     }
-    if (notify.currency && notify.currency !== appointment.currency) {
+    if (notify.currency !== appointment.currency) {
       await this.prisma.paymentAttempt.updateMany({
         where: { id: attempt.id, status: PaymentStatus.PENDING },
         data: { status: PaymentStatus.FAILED },
@@ -430,12 +526,27 @@ export class PaymentsService {
           );
         }
 
-        await tx.payment.updateMany({
-          where: { id: payment.id, status: PaymentStatus.PENDING },
+        // Invariant: the appointment is CONFIRMED only together with a PAID
+        // payment. A previously FAILED payment/attempt may be paid by a later
+        // verified success; any other state aborts the whole transaction, so
+        // the guarded confirmation above is rolled back too.
+        const paid = await tx.payment.updateMany({
+          where: {
+            id: payment.id,
+            status: { in: [PaymentStatus.PENDING, PaymentStatus.FAILED] },
+          },
           data: { status: PaymentStatus.PAID, paidAt: now },
         });
+        if (paid.count === 0) {
+          throw new ConflictException(
+            'Payment is not in a payable state; the appointment was not confirmed',
+          );
+        }
         await tx.paymentAttempt.updateMany({
-          where: { id: attempt.id, status: PaymentStatus.PENDING },
+          where: {
+            id: attempt.id,
+            status: { in: [PaymentStatus.PENDING, PaymentStatus.FAILED] },
+          },
           data: {
             status: PaymentStatus.PAID,
             providerPaymentId: notify.providerPaymentId,
@@ -476,6 +587,29 @@ export class PaymentsService {
     return { appointment: toAppointmentView(confirmed.row) };
   }
 
+  /**
+   * Failure callback. Fails only the attempt (if still pending); the payment is
+   * failed only when no other attempt is still pending. One transaction, so the
+   * attempt/payment pair never diverges. Never touches PAID/EXPIRED rows.
+   */
+  private async recordFailure(attemptId: string, paymentId: string) {
+    await this.prisma.$transaction(async (tx) => {
+      await tx.paymentAttempt.updateMany({
+        where: { id: attemptId, status: PaymentStatus.PENDING },
+        data: { status: PaymentStatus.FAILED },
+      });
+      const stillPending = await tx.paymentAttempt.count({
+        where: { paymentId, status: PaymentStatus.PENDING },
+      });
+      if (stillPending === 0) {
+        await tx.payment.updateMany({
+          where: { id: paymentId, status: PaymentStatus.PENDING },
+          data: { status: PaymentStatus.FAILED },
+        });
+      }
+    });
+  }
+
   private newMerchantReference(appointmentId: string) {
     return `wp_${appointmentId}_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
   }
@@ -486,6 +620,15 @@ function latestAttempt(appointment: AppointmentLoaded) {
   return [...attempts].sort(
     (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
   )[0];
+}
+
+/** Exact decimal comparison; an unparsable amount never matches. */
+function amountsEqual(received: string, expected: string): boolean {
+  try {
+    return new Prisma.Decimal(received).equals(new Prisma.Decimal(expected));
+  } catch {
+    return false;
+  }
 }
 
 function safeJson(raw: string): Prisma.InputJsonValue {

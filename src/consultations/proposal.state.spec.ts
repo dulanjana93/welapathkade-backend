@@ -9,12 +9,12 @@ import {
 
 describe('proposal.state', () => {
   it('allows PENDING → ACCEPTED / REJECTED / SUPERSEDED', () => {
-    expect(assertProposalTransition(ProposalStatus.PENDING, 'CUSTOMER_ACCEPT')).toBe(
-      ProposalStatus.ACCEPTED,
-    );
-    expect(assertProposalTransition(ProposalStatus.PENDING, 'CUSTOMER_REJECT')).toBe(
-      ProposalStatus.REJECTED,
-    );
+    expect(
+      assertProposalTransition(ProposalStatus.PENDING, 'CUSTOMER_ACCEPT'),
+    ).toBe(ProposalStatus.ACCEPTED);
+    expect(
+      assertProposalTransition(ProposalStatus.PENDING, 'CUSTOMER_REJECT'),
+    ).toBe(ProposalStatus.REJECTED);
     expect(assertProposalTransition(ProposalStatus.PENDING, 'SUPERSEDE')).toBe(
       ProposalStatus.SUPERSEDED,
     );

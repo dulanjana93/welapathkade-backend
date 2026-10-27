@@ -1,8 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import {
-  INestApplication,
-  ValidationPipe,
-} from '@nestjs/common';
+import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { DateTime } from 'luxon';
@@ -159,16 +156,18 @@ describe('Phase 4 Consultation Requests (e2e)', () => {
       })
       .expect(201);
 
-    const weekly: Record<string, Array<{ startTime: string; endTime: string }>> =
-      {
-        monday: [{ startTime: '09:00', endTime: '17:00' }],
-        tuesday: [{ startTime: '09:00', endTime: '17:00' }],
-        wednesday: [{ startTime: '09:00', endTime: '17:00' }],
-        thursday: [{ startTime: '09:00', endTime: '17:00' }],
-        friday: [{ startTime: '09:00', endTime: '17:00' }],
-        saturday: [{ startTime: '09:00', endTime: '17:00' }],
-        sunday: [{ startTime: '09:00', endTime: '17:00' }],
-      };
+    const weekly: Record<
+      string,
+      Array<{ startTime: string; endTime: string }>
+    > = {
+      monday: [{ startTime: '09:00', endTime: '17:00' }],
+      tuesday: [{ startTime: '09:00', endTime: '17:00' }],
+      wednesday: [{ startTime: '09:00', endTime: '17:00' }],
+      thursday: [{ startTime: '09:00', endTime: '17:00' }],
+      friday: [{ startTime: '09:00', endTime: '17:00' }],
+      saturday: [{ startTime: '09:00', endTime: '17:00' }],
+      sunday: [{ startTime: '09:00', endTime: '17:00' }],
+    };
     await request(app.getHttpServer())
       .put('/astrologers/me/availability')
       .set('Authorization', `Bearer ${token}`)
@@ -189,6 +188,11 @@ describe('Phase 4 Consultation Requests (e2e)', () => {
       .set('Authorization', `Bearer ${admin.accessToken}`)
       .send({ action: 'APPROVE' })
       .expect(200);
+    await request(app.getHttpServer())
+      .patch('/astrologers/me/online-status')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ isOnline: true })
+      .expect(200);
 
     const refreshed = await prisma.astrologerProfile.findUniqueOrThrow({
       where: { id: profile.id },
@@ -199,7 +203,7 @@ describe('Phase 4 Consultation Requests (e2e)', () => {
       token,
       profileId: profile.id,
       serviceId: serviceRes.body.id as string,
-      adminToken: admin.accessToken as string,
+      adminToken: admin.accessToken,
     };
   }
 

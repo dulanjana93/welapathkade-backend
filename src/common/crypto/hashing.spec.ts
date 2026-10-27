@@ -15,9 +15,9 @@ describe('hashing helpers', () => {
     const hash = hashOtpCode('123456', '+94771234567', 'secret');
     expect(hash).toBe(hashOtpCode('123456', '+94771234567', 'secret'));
     expect(hash).not.toContain('123456');
-    expect(safeEqualHex(hash, hashOtpCode('123456', '+94771234567', 'secret'))).toBe(
-      true,
-    );
+    expect(
+      safeEqualHex(hash, hashOtpCode('123456', '+94771234567', 'secret')),
+    ).toBe(true);
   });
 
   it('hashes refresh tokens', () => {

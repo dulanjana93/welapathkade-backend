@@ -11,9 +11,7 @@ import { PaymentStatus } from '@prisma/client';
  * PAID is terminal success. Duplicate callbacks stay PAID.
  */
 export type PaymentTransition =
-  | 'SUCCESS_VERIFIED'
-  | 'GATEWAY_FAILURE'
-  | 'HOLD_TIMEOUT';
+  'SUCCESS_VERIFIED' | 'GATEWAY_FAILURE' | 'HOLD_TIMEOUT';
 
 const ALLOWED: Record<
   PaymentTransition,
@@ -30,9 +28,7 @@ export function assertPaymentTransition(
 ): PaymentStatus {
   const rule = ALLOWED[transition];
   if (current !== rule.from) {
-    throw new Error(
-      `Invalid payment transition ${transition} from ${current}`,
-    );
+    throw new Error(`Invalid payment transition ${transition} from ${current}`);
   }
   return rule.to;
 }

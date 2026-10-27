@@ -1,8 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import {
-  INestApplication,
-  ValidationPipe,
-} from '@nestjs/common';
+import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import {
@@ -69,7 +66,11 @@ describe('Phase 2.5 Role registration & onboarding (e2e)', () => {
     await client.del(`otp:cooldown:${phone}`, `otp:hour:${phone}`);
   }
 
-  async function registerPublic(phone: string, name: string, referralCode?: string) {
+  async function registerPublic(
+    phone: string,
+    name: string,
+    referralCode?: string,
+  ) {
     await request(app.getHttpServer())
       .post('/auth/otp/request')
       .send({ phone, purpose: 'PUBLIC_REGISTRATION' })
@@ -281,7 +282,9 @@ describe('Phase 2.5 Role registration & onboarding (e2e)', () => {
       .post('/astrologers/me/application/submit')
       .set('Authorization', `Bearer ${token}`)
       .expect(201);
-    expect(submitted.body.status).toBe(AstrologerApplicationStatus.PENDING_REVIEW);
+    expect(submitted.body.status).toBe(
+      AstrologerApplicationStatus.PENDING_REVIEW,
+    );
 
     const pending = await request(app.getHttpServer())
       .get('/admin/astrologers')
@@ -311,7 +314,9 @@ describe('Phase 2.5 Role registration & onboarding (e2e)', () => {
       AstrologerApplicationStatus.REJECTED,
     );
     expect(rejectedMe.body.rejectionReason).toBe('Incomplete bio details');
-    expect(rejectedMe.body.profileStatus).toBe(AstrologerProfileStatus.INACTIVE);
+    expect(rejectedMe.body.profileStatus).toBe(
+      AstrologerProfileStatus.INACTIVE,
+    );
 
     await request(app.getHttpServer())
       .patch('/astrologers/me')

@@ -8,10 +8,7 @@ import { Prisma, Service, ServiceStatus } from '@prisma/client';
 import { toDecimal } from '../common/money/money';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateServiceDto, UpdateServiceDto } from './dto/service.dto';
-import {
-  toAdminServiceView,
-  toPublicServiceView,
-} from './service.mapper';
+import { toAdminServiceView, toPublicServiceView } from './service.mapper';
 
 @Injectable()
 export class ServicesService {

@@ -4,12 +4,7 @@ import {
   Inject,
   Injectable,
 } from '@nestjs/common';
-import {
-  DevicePlatform,
-  Language,
-  OtpPurpose,
-  User,
-} from '@prisma/client';
+import { DevicePlatform, Language, OtpPurpose, User } from '@prisma/client';
 import { normalizePhone } from '../common/phone/normalize-phone';
 import { PrismaService } from '../prisma/prisma.service';
 import { UsersService } from '../users/users.service';

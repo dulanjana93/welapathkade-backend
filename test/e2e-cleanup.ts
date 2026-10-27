@@ -11,13 +11,60 @@ export async function resetE2eDatabase(prisma: PrismaService): Promise<void> {
 
   // Notification.userId is ON DELETE RESTRICT: must go before users.
   await prisma.notification.deleteMany();
+  // Phase B ledger/wallet rows reference snapshots, payments, appointments, users.
+  // DEBITs must go first: reversesEntryId → CREDIT is ON DELETE RESTRICT.
+  try {
+    await prisma.ledgerEntry.deleteMany({ where: { kind: 'DEBIT' } });
+    await prisma.ledgerEntry.deleteMany();
+  } catch {
+    // ignore until Phase B migration is applied
+  }
+  try {
+    await prisma.appointmentFinancialSnapshot.deleteMany();
+  } catch {
+    // ignore until Phase A migration is applied
+  }
+  try {
+    await prisma.walletAccount.deleteMany();
+  } catch {
+    // ignore until Phase B migration is applied
+  }
+  try {
+    await prisma.platformAccount.updateMany({
+      data: { availableBalance: 0 },
+    });
+  } catch {
+    // ignore until Phase B migration is applied
+  }
   await prisma.paymentAttempt.deleteMany();
   await prisma.payment.deleteMany();
+  await prisma.astrologerReliabilityIncident.deleteMany();
+  // B3-a table may be absent until its migration is applied to the test DB.
+  try {
+    await prisma.sessionAttendanceEvidence.deleteMany();
+  } catch {
+    // ignore missing-table errors so pre-migration e2e suites still clean up
+  }
   await prisma.appointment.deleteMany();
   await prisma.consultationProposal.deleteMany();
   await prisma.consultationFile.deleteMany();
+  try {
+    await prisma.consultationFollowUpMessage.deleteMany();
+  } catch {
+    // ignore missing-table errors until the Phase 2 migration is applied
+  }
+  try {
+    await prisma.consultationReview.deleteMany();
+  } catch {
+    // ignore missing-table errors until the Phase 3 migration is applied
+  }
   await prisma.consultation.deleteMany();
   await prisma.file.deleteMany();
+  try {
+    await prisma.referralAttributionCorrection.deleteMany();
+  } catch {
+    // ignore until Phase C migration is applied
+  }
   await prisma.auditLog.deleteMany();
   await prisma.availabilityException.deleteMany();
   await prisma.weeklyAvailability.deleteMany();
@@ -29,6 +76,14 @@ export async function resetE2eDatabase(prisma: PrismaService): Promise<void> {
   await prisma.userSession.deleteMany();
   await prisma.userDevice.deleteMany();
   await prisma.otpVerification.deleteMany();
+  try {
+    await prisma.withdrawalEvent.deleteMany();
+    await prisma.withdrawalDebit.deleteMany();
+    await prisma.withdrawalRequest.deleteMany();
+    await prisma.astrologerBankAccount.deleteMany();
+  } catch {
+    // ignore until the withdrawal migration is applied
+  }
   await prisma.user.deleteMany();
 }
 

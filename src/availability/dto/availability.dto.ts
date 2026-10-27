@@ -98,16 +98,18 @@ export class CreateAvailabilityExceptionDto {
   type!: AvailabilityExceptionType;
 
   @ApiPropertyOptional({ example: '14:00' })
-  @ValidateIf((o: CreateAvailabilityExceptionDto) =>
-    o.type === AvailabilityExceptionType.AVAILABLE_OVERRIDE,
+  @ValidateIf(
+    (o: CreateAvailabilityExceptionDto) =>
+      o.type === AvailabilityExceptionType.AVAILABLE_OVERRIDE,
   )
   @IsString()
   @Matches(HHMM, { message: 'startTime must be HH:mm' })
   startTime?: string;
 
   @ApiPropertyOptional({ example: '18:00' })
-  @ValidateIf((o: CreateAvailabilityExceptionDto) =>
-    o.type === AvailabilityExceptionType.AVAILABLE_OVERRIDE,
+  @ValidateIf(
+    (o: CreateAvailabilityExceptionDto) =>
+      o.type === AvailabilityExceptionType.AVAILABLE_OVERRIDE,
   )
   @IsString()
   @Matches(HHMM, { message: 'endTime must be HH:mm' })

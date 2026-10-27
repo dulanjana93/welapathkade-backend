@@ -8,7 +8,11 @@ export function hmacSha256(value: string, secret: string): string {
   return createHmac('sha256', secret).update(value).digest('hex');
 }
 
-export function hashOtpCode(code: string, phone: string, secret: string): string {
+export function hashOtpCode(
+  code: string,
+  phone: string,
+  secret: string,
+): string {
   return hmacSha256(`${phone}:${code}`, secret);
 }
 

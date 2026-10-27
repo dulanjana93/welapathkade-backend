@@ -32,9 +32,7 @@ export class AvailabilityPublicController {
     return this.availabilityService.getPublicSlots(id, {
       from,
       to,
-      durationMinutes: durationMinutes
-        ? Number(durationMinutes)
-        : undefined,
+      durationMinutes: durationMinutes ? Number(durationMinutes) : undefined,
     });
   }
 }

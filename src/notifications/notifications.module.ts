@@ -1,5 +1,6 @@
-import { Module } from '@nestjs/common';
+import { Logger, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { assertFcmProviderAllowed } from '../config/runtime-safety';
 import {
   FCM_PROVIDER,
   resolveFcmProviderKind,
@@ -27,10 +28,19 @@ import { NoopFcmProvider } from './providers/noop-fcm.provider';
         consoleProvider: ConsoleFcmProvider,
         noopProvider: NoopFcmProvider,
       ): FcmProvider => {
+        const nodeEnv = config.get<string>('app.nodeEnv');
         const kind = resolveFcmProviderKind(
           config.get<string>('app.notificationsFcmProvider'),
-          config.get<string>('app.nodeEnv'),
+          nodeEnv,
         );
+        // `console` logs notification activity: development-only (throws).
+        // `noop` delivers nothing; allowed, but loudly flagged outside dev.
+        const { warnNoDelivery } = assertFcmProviderAllowed(kind, nodeEnv);
+        if (warnNoDelivery) {
+          new Logger('NotificationsModule').warn(
+            'No real push provider is configured: notifications are recorded but NOT delivered.',
+          );
+        }
         return kind === 'console' ? consoleProvider : noopProvider;
       },
     },
