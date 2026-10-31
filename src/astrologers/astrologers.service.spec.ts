@@ -181,6 +181,8 @@ describe('AstrologersService', () => {
     const rows = await service.listDiscoverable({});
     expect(rows).toHaveLength(1);
     expect(rows[0]).not.toHaveProperty('phone');
+    expect(rows[0]).not.toHaveProperty('objectKey');
+    expect(rows[0].hasProfilePicture).toBe(false);
     expect(rows[0]).not.toHaveProperty('referralCode');
     expect(rows[0]).not.toHaveProperty('referredByUserId');
     expect(rows[0].services[0].price).toBe('1500.00');

@@ -42,6 +42,7 @@ export type PublicUserView = {
 export type SelfAuthView = PublicUserView & {
   phone: string;
   email?: string | null;
+  hasProfilePicture: boolean;
   profileStatus?: AstrologerProfileStatus | null;
   applicationStatus?: AstrologerApplicationStatus | null;
   rejectionReason?: string | null;
@@ -74,6 +75,7 @@ export class UsersService {
       ...this.toPublicView(user),
       phone: user.phone,
       email: user.email,
+      hasProfilePicture: user.profilePictureFileId != null,
     };
   }
 

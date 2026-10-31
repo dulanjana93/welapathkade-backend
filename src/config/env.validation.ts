@@ -170,12 +170,19 @@ export class EnvironmentVariables {
   @IsNotEmpty()
   STORAGE_BUCKET?: string;
 
+  /**
+   * Account S3 endpoint only, for example
+   * `https://<accountid>.r2.cloudflarestorage.com`. Do not append the bucket.
+   */
   @Transform(({ value }: { value: unknown }) => trimToUndefined(value))
   @IsOptional()
   @IsString()
   @IsNotEmpty()
   S3_ENDPOINT?: string;
 
+  /**
+   * Cloudflare R2 signing region. `auto` when set; omitted means `auto`.
+   */
   @Transform(({ value }: { value: unknown }) => trimToUndefined(value))
   @IsOptional()
   @IsString()

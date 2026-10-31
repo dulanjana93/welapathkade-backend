@@ -25,6 +25,7 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
     "bootstrap:admin": "ts-node -r tsconfig-paths/register src/scripts/bootstrap-admin.ts",
+    "storage:verify": "ts-node -r tsconfig-paths/register src/scripts/verify-r2-storage.ts",
     "prisma:seed": "ts-node -r tsconfig-paths/register prisma/seed.ts",
     "prisma:migrate:deploy": "prisma migrate deploy"
   },

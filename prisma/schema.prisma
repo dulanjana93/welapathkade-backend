@@ -190,6 +190,8 @@ model User {
   role             UserRole
   status           UserStatus @default(ACTIVE)
   language         Language   @default(SI)
+  /// Private profile picture. Bytes live in object storage, never in this row.
+  profilePictureFileId String? @unique
   referralCode     String     @unique
   referredByUserId String?
   createdAt        DateTime   @default(now())
@@ -198,6 +200,7 @@ model User {
   referredBy  User?  @relation("UserReferrals", fields: [referredByUserId], references: [id])
   referrals   User[] @relation("UserReferrals")
 
+  profilePicture       File?                    @relation("UserProfilePicture", fields: [profilePictureFileId], references: [id], onDelete: Restrict)
   sessions             UserSession[]
   devices              UserDevice[]
   otpVerifications     OtpVerification[]
@@ -696,6 +699,7 @@ model File {
   updatedAt        DateTime     @updatedAt
 
   uploadedBy       User               @relation("FileUploader", fields: [uploadedByUserId], references: [id], onDelete: Restrict)
+  profilePictureOwner User?             @relation("UserProfilePicture")
   consultationFiles ConsultationFile[]
 
   @@index([uploadedByUserId])

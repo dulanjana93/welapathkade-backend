@@ -76,6 +76,7 @@ export class AstrologersService {
       hasActiveService: profile.services.length > 0,
       userActive: user.status === UserStatus.ACTIVE,
       ratingSummary,
+      hasProfilePicture: user.profilePictureFileId != null,
     });
   }
 
@@ -110,6 +111,7 @@ export class AstrologersService {
     return toOwnProfileView(profile, {
       hasActiveService: false,
       userActive: user.status === UserStatus.ACTIVE,
+      hasProfilePicture: user.profilePictureFileId != null,
     });
   }
 
@@ -151,6 +153,7 @@ export class AstrologersService {
     return toOwnProfileView(profile, {
       hasActiveService: profile.services.length > 0,
       userActive: user.status === UserStatus.ACTIVE,
+      hasProfilePicture: user.profilePictureFileId != null,
     });
   }
 
@@ -341,6 +344,7 @@ export class AstrologersService {
         },
       },
       include: {
+        user: { select: { profilePictureFileId: true } },
         services: {
           where: {
             status: AstrologerServiceStatus.ACTIVE,
@@ -364,6 +368,7 @@ export class AstrologersService {
         p,
         p.services,
         aggregates.get(p.id) ?? { averageRating: null, reviewCount: 0 },
+        { hasProfilePicture: p.user?.profilePictureFileId != null },
       ),
     );
   }
@@ -379,6 +384,7 @@ export class AstrologersService {
         },
       },
       include: {
+        user: { select: { profilePictureFileId: true } },
         services: {
           where: {
             status: AstrologerServiceStatus.ACTIVE,
@@ -395,7 +401,9 @@ export class AstrologersService {
     }
 
     const ratingSummary = await this.reviews.aggregateForAstrologer(profile.id);
-    return toPublicAstrologerView(profile, profile.services, ratingSummary);
+    return toPublicAstrologerView(profile, profile.services, ratingSummary, {
+      hasProfilePicture: profile.user?.profilePictureFileId != null,
+    });
   }
 
   listPublicReviews(astrologerId: string, page?: number, limit?: number) {
@@ -451,6 +459,7 @@ export class AstrologersService {
     return toOwnProfileView(updated, {
       hasActiveService: updated.services.length > 0,
       userActive: updated.user.status === UserStatus.ACTIVE,
+      hasProfilePicture: updated.user.profilePictureFileId != null,
     });
   }
 
@@ -491,6 +500,7 @@ export class AstrologersService {
       profile: toOwnProfileView(profile, {
         hasActiveService: profile.services.length > 0,
         userActive: user.status === UserStatus.ACTIVE,
+        hasProfilePicture: user.profilePictureFileId != null,
       }),
       application: {
         id: application.id,

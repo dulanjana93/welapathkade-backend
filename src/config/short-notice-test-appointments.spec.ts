@@ -8,6 +8,15 @@ import {
 } from './short-notice-test-appointments';
 import { validateEnv } from './validate-env';
 
+const s3Env = {
+  STORAGE_DRIVER: 's3',
+  S3_ENDPOINT: 'https://example.r2.cloudflarestorage.com',
+  S3_REGION: 'auto',
+  S3_BUCKET: 'private-consultations',
+  S3_ACCESS_KEY_ID: 'access-key',
+  S3_SECRET_ACCESS_KEY: 'secret-key',
+};
+
 const baseEnv = {
   NODE_ENV: 'development',
   PORT: '3010',
@@ -89,6 +98,7 @@ describe('short-notice test appointment override', () => {
     expect(() =>
       validateEnv({
         ...baseEnv,
+        ...s3Env,
         NODE_ENV: 'production',
         CORS_ORIGINS: 'https://example.com',
       }),
@@ -96,6 +106,7 @@ describe('short-notice test appointment override', () => {
     expect(() =>
       validateEnv({
         ...baseEnv,
+        ...s3Env,
         NODE_ENV: 'production',
         ALLOW_SHORT_NOTICE_TEST_APPOINTMENTS: 'false',
         CORS_ORIGINS: 'https://example.com',

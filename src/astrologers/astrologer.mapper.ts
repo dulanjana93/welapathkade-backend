@@ -31,6 +31,7 @@ export type PublicAstrologerListItem = {
   bio: string | null;
   experienceYears: number;
   photo: string | null;
+  hasProfilePicture: boolean;
   city: string | null;
   district: string | null;
   status: AstrologerProfileStatus;
@@ -48,6 +49,7 @@ export type OwnAstrologerProfileView = {
   bio: string | null;
   experienceYears: number;
   photo: string | null;
+  hasProfilePicture: boolean;
   city: string | null;
   district: string | null;
   status: AstrologerProfileStatus;
@@ -98,6 +100,7 @@ export function toPublicAstrologerView(
     averageRating: null,
     reviewCount: 0,
   },
+  options?: { hasProfilePicture?: boolean },
 ): PublicAstrologerDetail {
   return {
     id: profile.id,
@@ -105,6 +108,7 @@ export function toPublicAstrologerView(
     bio: profile.bio,
     experienceYears: profile.experienceYears,
     photo: profile.photo,
+    hasProfilePicture: options?.hasProfilePicture === true,
     city: profile.city,
     district: profile.district,
     status: profile.status,
@@ -126,6 +130,7 @@ export function toOwnProfileView(
     hasActiveService: boolean;
     userActive: boolean;
     ratingSummary?: RatingSummaryView;
+    hasProfilePicture?: boolean;
   },
 ): OwnAstrologerProfileView {
   const isComplete =
@@ -141,6 +146,7 @@ export function toOwnProfileView(
     bio: profile.bio,
     experienceYears: profile.experienceYears,
     photo: profile.photo,
+    hasProfilePicture: options.hasProfilePicture === true,
     city: profile.city,
     district: profile.district,
     status: profile.status,

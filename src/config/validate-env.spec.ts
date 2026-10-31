@@ -2,6 +2,15 @@ import 'reflect-metadata';
 import { resolveFcmProviderKind } from '../notifications/fcm-provider.interface';
 import { validateEnv } from './validate-env';
 
+const s3Env = {
+  STORAGE_DRIVER: 's3',
+  S3_ENDPOINT: 'https://example.r2.cloudflarestorage.com',
+  S3_REGION: 'auto',
+  S3_BUCKET: 'private-consultations',
+  S3_ACCESS_KEY_ID: 'access-key',
+  S3_SECRET_ACCESS_KEY: 'secret-key',
+};
+
 const baseEnv = {
   NODE_ENV: 'development',
   PORT: '3010',
@@ -20,8 +29,14 @@ describe('validateEnv: NODE_ENV', () => {
     );
   });
 
-  it.each(['development', 'test', 'production'])('accepts %s', (env) => {
+  it.each(['development', 'test'])('accepts %s', (env) => {
     expect(validateEnv({ ...baseEnv, NODE_ENV: env }).NODE_ENV).toBe(env);
+  });
+
+  it('accepts production when private S3 storage is configured', () => {
+    expect(
+      validateEnv({ ...baseEnv, NODE_ENV: 'production', ...s3Env }).NODE_ENV,
+    ).toBe('production');
   });
 
   it.each(['staging', 'prod', 'Production', ''])('rejects %j', (env) => {
@@ -127,5 +142,92 @@ describe('validateEnv: Agora RTC', () => {
         AGORA_APP_CERTIFICATE: '',
       }),
     ).not.toThrow();
+  });
+});
+
+describe('validateEnv: object storage', () => {
+  it('allows local storage outside production', () => {
+    expect(validateEnv({ ...baseEnv }).STORAGE_DRIVER).toBeUndefined();
+    expect(
+      validateEnv({ ...baseEnv, STORAGE_DRIVER: 'local' }).STORAGE_DRIVER,
+    ).toBe('local');
+  });
+
+  it('rejects local storage in production, including when the driver is unset', () => {
+    expect(() => validateEnv({ ...baseEnv, NODE_ENV: 'production' })).toThrow(
+      /STORAGE_DRIVER must be s3 in production/,
+    );
+    expect(() =>
+      validateEnv({
+        ...baseEnv,
+        NODE_ENV: 'production',
+        STORAGE_DRIVER: 'local',
+      }),
+    ).toThrow(/STORAGE_DRIVER must be s3 in production/);
+  });
+
+  it('accepts Cloudflare R2 settings and trims them', () => {
+    const env = validateEnv({
+      ...baseEnv,
+      STORAGE_DRIVER: ' S3 ',
+      S3_ENDPOINT: '  https://example.r2.cloudflarestorage.com/  ',
+      S3_REGION: ' auto ',
+      S3_BUCKET: ' private-consultations ',
+      S3_ACCESS_KEY_ID: ' access-key ',
+      S3_SECRET_ACCESS_KEY: ' secret-key ',
+    });
+    expect(env.STORAGE_DRIVER).toBe('s3');
+    expect(env.S3_ENDPOINT).toBe('https://example.r2.cloudflarestorage.com/');
+    expect(env.S3_REGION).toBe('auto');
+    expect(env.S3_BUCKET).toBe('private-consultations');
+    expect(env.S3_ACCESS_KEY_ID).toBe('access-key');
+    expect(env.S3_SECRET_ACCESS_KEY).toBe('secret-key');
+  });
+
+  it('defaults an omitted region to acceptance (the client uses auto)', () => {
+    expect(
+      validateEnv({ ...baseEnv, ...s3Env, S3_REGION: undefined }).S3_REGION,
+    ).toBeUndefined();
+  });
+
+  it.each([
+    'S3_ENDPOINT',
+    'S3_BUCKET',
+    'S3_ACCESS_KEY_ID',
+    'S3_SECRET_ACCESS_KEY',
+  ])('requires %s when STORAGE_DRIVER=s3', (name) => {
+    expect(() =>
+      validateEnv({ ...baseEnv, ...s3Env, [name]: undefined }),
+    ).toThrow(new RegExp(`${name} must be set when STORAGE_DRIVER=s3`));
+  });
+
+  it('rejects a region other than auto', () => {
+    expect(() =>
+      validateEnv({ ...baseEnv, ...s3Env, S3_REGION: 'Asia-Pacific' }),
+    ).toThrow(/S3_REGION must be auto/);
+  });
+
+  it('rejects an endpoint that includes the bucket path or credentials', () => {
+    expect(() =>
+      validateEnv({
+        ...baseEnv,
+        ...s3Env,
+        S3_ENDPOINT: 'https://example.r2.cloudflarestorage.com/welapathkade',
+      }),
+    ).toThrow(/without a bucket path/);
+    expect(() =>
+      validateEnv({
+        ...baseEnv,
+        ...s3Env,
+        S3_ENDPOINT: 'http://example.r2.cloudflarestorage.com',
+      }),
+    ).toThrow(/https URL/);
+    expect(() =>
+      validateEnv({
+        ...baseEnv,
+        ...s3Env,
+        S3_ENDPOINT: 'https://key:secret@example.r2.cloudflarestorage.com',
+      }),
+    ).toThrow(/without embedded credentials/);
   });
 });

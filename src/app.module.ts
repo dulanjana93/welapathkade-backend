@@ -19,6 +19,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
 import { SessionEvidenceModule } from './session-evidence/session-evidence.module';
 import { ServicesModule } from './services/services.module';
+import { ProfilePicturesModule } from './profile-pictures/profile-pictures.module';
 import { UsersModule } from './users/users.module';
 import { VideoModule } from './video/video.module';
 
@@ -34,6 +35,7 @@ import { VideoModule } from './video/video.module';
     HealthModule,
     UsersModule,
     AuthModule,
+    ProfilePicturesModule,
     ServicesModule,
     AstrologersModule,
     AvailabilityModule,
