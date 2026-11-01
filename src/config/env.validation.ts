@@ -146,6 +146,28 @@ export class EnvironmentVariables {
   ALLOW_SHORT_NOTICE_TEST_APPOINTMENTS?: string;
 
   /**
+   * Notify.lk SMS. All three are required in production and must be set
+   * together everywhere else. Empty values are treated as unset.
+   */
+  @Transform(({ value }: { value: unknown }) => trimToUndefined(value))
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  NOTIFY_LK_USER_ID?: string;
+
+  @Transform(({ value }: { value: unknown }) => trimToUndefined(value))
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  NOTIFY_LK_API_KEY?: string;
+
+  @Transform(({ value }: { value: unknown }) => trimToUndefined(value))
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  NOTIFY_LK_SENDER_ID?: string;
+
+  /**
    * `local` (dev/test disk) or `s3` (private Cloudflare R2). Production must
    * use `s3`. Unset means local outside production.
    */
@@ -248,6 +270,86 @@ export class EnvironmentVariables {
   @Min(1)
   @Max(168)
   ATTACHMENT_ABANDONED_HOURS?: number;
+
+  /**
+   * Unset in development/test keeps the mock gateway. `sandbox` selects
+   * PayHere sandbox. `live` is production only.
+   */
+  @Transform(({ value }: { value: unknown }) => {
+    if (typeof value !== 'string') return value;
+    const normalized = value.trim().toLowerCase();
+    return normalized === '' ? undefined : normalized;
+  })
+  @IsOptional()
+  @IsIn(['sandbox', 'live'])
+  PAYHERE_MODE?: string;
+
+  /**
+   * Required only to run PayHere sandbox while NODE_ENV=production.
+   * Unset does not enable sandbox. `true` is rejected unless the mode is sandbox.
+   */
+  @Transform(({ value }: { value: unknown }) => {
+    if (typeof value !== 'string') return value;
+    const normalized = value.trim().toLowerCase();
+    return normalized === '' ? undefined : normalized;
+  })
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  PAYHERE_ALLOW_SANDBOX?: string;
+
+  @Transform(({ value }: { value: unknown }) => trimToUndefined(value))
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  PAYHERE_MERCHANT_ID?: string;
+
+  @Transform(({ value }: { value: unknown }) => trimToUndefined(value))
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  PAYHERE_MERCHANT_SECRET?: string;
+
+  @Transform(({ value }: { value: unknown }) => trimToUndefined(value))
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  PAYHERE_CHECKOUT_URL?: string;
+
+  @Transform(({ value }: { value: unknown }) => trimToUndefined(value))
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  PAYHERE_OAUTH_URL?: string;
+
+  @Transform(({ value }: { value: unknown }) => trimToUndefined(value))
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  PAYHERE_APP_ID?: string;
+
+  @Transform(({ value }: { value: unknown }) => trimToUndefined(value))
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  PAYHERE_APP_SECRET?: string;
+
+  @Transform(({ value }: { value: unknown }) => trimToUndefined(value))
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  PAYHERE_NOTIFY_URL?: string;
+
+  @Transform(({ value }: { value: unknown }) => trimToUndefined(value))
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  PAYHERE_RETURN_URL?: string;
+
+  @Transform(({ value }: { value: unknown }) => trimToUndefined(value))
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  PAYHERE_CANCEL_URL?: string;
 }
 
 function trimToUndefined(value: unknown): unknown {

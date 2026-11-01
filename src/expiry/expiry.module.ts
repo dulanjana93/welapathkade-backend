@@ -10,8 +10,9 @@ import { SessionCompletionSweepService } from './session-completion-sweep.servic
 /**
  * Background expiry of unpaid payment holds (30 min), unanswered consultation
  * requests (12 h), hard-end completion of IN_PROGRESS sessions, Phase A
- * financial snapshot creation after the 24h settlement hold, and Phase B
- * ledger posting (RECORDED → POSTED) for available wallet balances.
+ * financial snapshot creation after the 24h settlement hold, Phase B
+ * ledger posting (RECORDED → POSTED), and PayHere refund initiation plus
+ * retrieval reconciliation for unresolved refunds.
  * PrismaModule and ConfigModule are global.
  */
 @Module({

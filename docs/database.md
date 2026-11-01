@@ -37,6 +37,12 @@ User
 id
 phone UNIQUE
 name
+billingFirstName NULL
+billingLastName NULL
+billingEmail NULL
+billingAddress NULL
+billingCity NULL
+billingCountry NULL
 role
 status
 language
@@ -69,6 +75,8 @@ User.referredByUserId -> User.id
 A user can have another public user as referrer.
 
 Referral relationship is normally immutable.
+
+Customer billing columns are nullable. They are filled when the customer saves a billing profile, not at registration. `billingEmail` is the payment contact email. It is separate from `email`, which remains the optional admin login address. The customer's phone number stays on `phone`.
 
 4. UserSession
 UserSession
@@ -544,6 +552,14 @@ REFUND_PENDING
 REFUNDED
 
 Gateway IDs must support idempotency.
+
+The implemented payment provider is `MOCK` or `PAYHERE`. `PaymentAttempt.merchantReference` is the PayHere `order_id`. `providerPaymentId` stores PayHere's `payment_id` after a verified notification or retrieval. `PayHereNotification` is unique on merchant reference, PayHere payment id, and status code. Cardholder name, masked card number, and card expiry are not stored. A full refund obligation is not a completed PayHere refund.
+
+`PayHereRefund` is one refund attempt. `openRefundSlot` holds the payment id while the attempt is not a definitive unused failure, so a second full refund cannot start. It is cleared only after Retrieval shows the payment is still `RECEIVED`. `payhereRefundNumber` is unique and null until PayHere returns one. Status is `PENDING`, `PROCESSING`, `SUCCEEDED`, `FAILED`, or `REQUIRES_REVIEW`. The stored provider metadata is the status, message, and refund number only.
+
+`SavedPaymentMethod` is a customer card registration, not a consultation payment. `merchantReference` is the PayHere pre-approval `order_id` and starts with `pa_`. `openCardSlot` is the user id while the card is `PENDING` or `ACTIVE`, so a customer cannot have two usable registrations. The PayHere `customer_token` is stored only as `tokenCiphertext`, `tokenIv`, and `tokenTag` (AES-256-GCM). Those columns are nulled on revocation or removal. `cardLast4` is stored only when PayHere sends a masked card number. Cardholder name, expiry, CVV, and the plaintext token are not stored. `SavedCardConsentEvent` records `CONSENT_GRANTED`, `CONSENT_REVOKED`, and `CARD_REMOVED` with the consent version. Status moves `PENDING` to `ACTIVE` only after a verified pre-approval notification, or to `FAILED` when PayHere reports failure or cancellation. `DISABLED` is a customer revocation. `REMOVED` is a customer removal. Neither status can become `ACTIVE` again.
+
+A saved-card consultation charge is a normal `PaymentAttempt` whose `merchantReference` starts with `sc_`. `openChargeSlot` is the payment id while that attempt is in flight, pending, or uncertain, so a second charge cannot start. `requiresReview` means the charge is not verified. A synchronous Charging API response does not clear it. It is cleared only when Retrieval returns one matching `RECEIVED` payment, or when the attempt is marked failed because the charge POST was never sent. `checkoutPayload.dispatchAuthorizedAt` is set under a row lock on the saved card after OAuth and before that POST. The plaintext `customer_token` is not stored on the attempt.
 
 20. ConsultationFinancial
 ConsultationFinancial

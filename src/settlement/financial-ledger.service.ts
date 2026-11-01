@@ -219,9 +219,10 @@ export class FinancialLedgerService {
    * available balances are clawed back. Idempotent via unique DEBIT keys and
    * reversesEntryId.
    *
-   * Prerequisite: Appointment.refundObligation must be set. There is no
-   * confirmed external refund event in the system today; callers must not
-   * treat this as "customer was refunded".
+ * Prerequisite: Appointment.refundObligation must be set. A PayHereRefund row
+ * is a separate record of the gateway request. This reversal is not proof
+ * that PayHere refunded the customer, and a PayHere success is not proof
+ * that this reversal ran. Calling it again does not append a second reversal.
    */
   async reversePostedSnapshotForRefundObligation(
     appointmentId: string,

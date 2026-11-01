@@ -12,6 +12,12 @@ export type EncryptedAccountNumber = {
   last4: string;
 };
 
+export type EncryptedSecret = {
+  ciphertext: string;
+  iv: string;
+  tag: string;
+};
+
 @Injectable()
 export class BankAccountCrypto {
   private readonly key: Buffer;
@@ -38,6 +44,32 @@ export class BankAccountCrypto {
       tag: tag.toString('base64'),
       last4: accountNumber.slice(-4),
     };
+  }
+
+  /**
+   * AES-256-GCM for a secret that must not keep a readable fragment.
+   * Uses the same server key as bank-account numbers. Do not log the result.
+   */
+  encryptOpaque(secret: string): EncryptedSecret {
+    if (!secret) {
+      throw new Error('Cannot encrypt an empty secret');
+    }
+    const iv = randomBytes(IV_BYTES);
+    const cipher = createCipheriv(ALGORITHM, this.key, iv);
+    const ciphertext = Buffer.concat([
+      cipher.update(secret, 'utf8'),
+      cipher.final(),
+    ]);
+    return {
+      ciphertext: ciphertext.toString('base64'),
+      iv: iv.toString('base64'),
+      tag: cipher.getAuthTag().toString('base64'),
+    };
+  }
+
+  /** Server-side only. Do not return this value from customer APIs. */
+  decryptOpaque(payload: EncryptedSecret): string {
+    return this.decrypt({ ...payload, last4: '' });
   }
 
   /** Server-side only. Do not return this value from read APIs. */

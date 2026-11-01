@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import {
   AppointmentStatus,
@@ -35,6 +36,7 @@ import {
   type AppointmentTransition,
 } from './appointment.state';
 import type { AttendanceInput, SessionEventInput } from './session-events';
+import { PayHereRefundService } from './payhere-refund.service';
 
 const appointmentInclude = {
   payments: { include: { attempts: true } },
@@ -56,8 +58,9 @@ type Tx = Prisma.TransactionClient;
  *   (SESSION_END after credential hard-end). Leaving Agora never completes.
  * - Every transition runs under the astrologer booking-guard lock and uses a
  *   status-guarded update, so concurrent attempts cannot contradict each other.
- * - Refund outcomes are recorded as an OBLIGATION only. No payment, refund,
- *   ledger, earnings or referral record is created here.
+ * - Refund outcomes are recorded as an OBLIGATION inside the appointment lock.
+ *   A PayHere refund, when one is due, is requested only after that lock
+ *   commits. This lifecycle never credits wallets or referral ledgers.
  * - Financial allocation snapshots are created separately by
  *   FinancialSnapshotService after the 24h settlement hold (Phase A).
  *   Ledger CREDITS / wallet availability are posted by FinancialLedgerService
@@ -68,6 +71,7 @@ export class AppointmentLifecycleService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly bookingGuard: BookingGuardService,
+    @Optional() private readonly refunds?: PayHereRefundService,
   ) {}
 
   /**
@@ -204,7 +208,9 @@ export class AppointmentLifecycleService {
         'Both participants joined; this is not a no-show',
       );
     }
-    return this.locked(report.appointmentId, async (tx, current) => {
+    const owesRefund =
+      transition === 'ASTROLOGER_NO_SHOW' || transition === 'BOTH_NO_SHOW';
+    const view = await this.locked(report.appointmentId, async (tx, current) => {
       const target = noShowStatus(transition);
       if (current.status === target) {
         return this.reload(tx, current.id); // idempotent repeat
@@ -216,14 +222,13 @@ export class AppointmentLifecycleService {
         );
       }
 
-      const owesRefund =
-        transition === 'ASTROLOGER_NO_SHOW' || transition === 'BOTH_NO_SHOW';
+      const customerOwesNothing = transition === 'CUSTOMER_NO_SHOW';
       await this.guardedUpdate(tx, current, AppointmentStatus.CONFIRMED, {
         status: target,
         noShowRecordedAt: now,
         ...(owesRefund ? refundObligationData(now) : {}),
         // Customer no-show: manual review before any settlement.
-        manualReviewRequired: transition === 'CUSTOMER_NO_SHOW',
+        manualReviewRequired: customerOwesNothing,
       });
       await this.closeConsultation(tx, current, 'APPOINTMENT_CLOSED');
       if (transition === 'ASTROLOGER_NO_SHOW') {
@@ -231,6 +236,8 @@ export class AppointmentLifecycleService {
       }
       return this.reload(tx, current.id);
     });
+    if (owesRefund) await this.startRefund(report.appointmentId);
+    return view;
   }
 
   private async cancel(
@@ -245,7 +252,7 @@ export class AppointmentLifecycleService {
         : AppointmentStatus.CANCELLED_BY_ASTROLOGER;
     // Only the customer's own response may include payment details.
     const customerView = transition === 'CUSTOMER_CANCEL';
-    return this.locked(appointmentId, async (tx, current) => {
+    const view = await this.locked(appointmentId, async (tx, current) => {
       if (current.status === target) {
         return this.reload(tx, current.id, customerView); // idempotent repeat
       }
@@ -278,6 +285,17 @@ export class AppointmentLifecycleService {
       }
       return this.reload(tx, current.id, customerView);
     });
+    await this.startRefund(appointmentId);
+    return view;
+  }
+
+  private async startRefund(appointmentId: string) {
+    if (!this.refunds) return;
+    try {
+      await this.refunds.requestForAppointment(appointmentId);
+    } catch {
+      // The obligation is already committed. A later sweep can start the refund.
+    }
   }
 
   private async locked<T>(

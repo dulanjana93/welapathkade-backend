@@ -175,8 +175,38 @@ enum PaymentStatus {
   CANCELLED
 }
 
+enum PayHereRefundStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  REQUIRES_REVIEW
+}
+
+enum PayHereRefundReason {
+  RESERVATION_EXPIRED
+  CANCELLATION
+  NO_SHOW
+  ADMIN_RETRY
+}
+
 enum PaymentProvider {
   MOCK
+  PAYHERE
+}
+
+enum SavedCardStatus {
+  PENDING
+  ACTIVE
+  DISABLED
+  REMOVED
+  FAILED
+}
+
+enum SavedCardConsentEventType {
+  CONSENT_GRANTED
+  CONSENT_REVOKED
+  CARD_REMOVED
 }
 
 model User {
@@ -187,6 +217,17 @@ model User {
   /// Argon2id hash. Required for ADMIN. Never returned via API.
   passwordHash     String?    @db.VarChar(255)
   name             String
+  /// PayHere billing name. Null until the customer completes checkout billing.
+  /// Does not replace `name`.
+  billingFirstName String?   @db.VarChar(80)
+  billingLastName  String?   @db.VarChar(80)
+  /// Billing email for payment checkout. Null until provided. Not a login
+  /// credential and not unique: `email` remains the admin login address.
+  billingEmail     String?   @db.VarChar(254)
+  billingAddress   String?   @db.VarChar(255)
+  billingCity      String?   @db.VarChar(80)
+  /// Trimmed country name, or an uppercase ISO 3166-1 alpha-2 code.
+  billingCountry   String?   @db.VarChar(80)
   role             UserRole
   status           UserStatus @default(ACTIVE)
   language         Language   @default(SI)
@@ -227,6 +268,8 @@ model User {
   referralCorrectionsAsTarget ReferralAttributionCorrection[] @relation("ReferralCorrectionTarget")
   /// Admin actor rows for referral attribution corrections.
   referralCorrectionsAsAdmin  ReferralAttributionCorrection[] @relation("ReferralCorrectionAdmin")
+  savedPaymentMethods SavedPaymentMethod[]
+  savedCardConsentEvents SavedCardConsentEvent[]
 
   @@index([referredByUserId])
 }
@@ -591,6 +634,7 @@ model Appointment {
   customer     User                @relation("AppointmentCustomer", fields: [customerId], references: [id], onDelete: Restrict)
   astrologer   AstrologerProfile   @relation(fields: [astrologerId], references: [id], onDelete: Restrict)
   payments     Payment[]
+  payHereRefunds PayHereRefund[]
 
   @@index([astrologerId, status, startAt])
   @@index([customerId, status])
@@ -658,6 +702,7 @@ model Payment {
   appointment  Appointment      @relation(fields: [appointmentId], references: [id], onDelete: Restrict)
   consultation Consultation     @relation(fields: [consultationId], references: [id], onDelete: Restrict)
   attempts     PaymentAttempt[]
+  payHereRefunds PayHereRefund[]
   financialSnapshot AppointmentFinancialSnapshot?
   ledgerEntries     LedgerEntry[]
 
@@ -674,6 +719,10 @@ model PaymentAttempt {
   status            PaymentStatus   @default(PENDING)
   checkoutPayload   Json?
   rawNotifyPayload  Json?
+  /// Saved-card charge whose PayHere outcome is not known. Blocks another charge.
+  requiresReview    Boolean         @default(false)
+  /// Payment id while a saved-card charge is in flight, pending, or uncertain.
+  openChargeSlot    String?         @unique @db.VarChar(191)
   createdAt         DateTime        @default(now())
   updatedAt         DateTime        @updatedAt
 
@@ -681,6 +730,105 @@ model PaymentAttempt {
 
   @@index([paymentId])
   @@index([status])
+  @@index([requiresReview])
+}
+
+/// Verified PayHere server notification. Card fields are never stored.
+/// One row per order, PayHere payment id, and status code.
+model PayHereNotification {
+  id                String   @id @default(cuid())
+  merchantReference String   @db.VarChar(191)
+  /// Empty string when PayHere omits payment_id, so the unique key still holds.
+  payherePaymentId  String   @default("") @db.VarChar(64)
+  statusCode        Int
+  amount            Decimal? @db.Decimal(12, 2)
+  currency          String?  @db.VarChar(8)
+  createdAt         DateTime @default(now())
+
+  @@unique([merchantReference, payherePaymentId, statusCode], map: "PayHereNotification_merchantRef_paymentId_statusCode_key")
+  @@index([merchantReference])
+}
+
+/// One PayHere refund attempt. `openRefundSlot` is the payment id while the
+/// attempt is not a definitive failure, so a second full refund cannot start.
+model PayHereRefund {
+  id                  String              @id @default(cuid())
+  paymentId           String
+  appointmentId       String
+  payherePaymentId    String              @db.VarChar(64)
+  /// Present once PayHere returns a refund number. Not proof of a ledger reversal.
+  payhereRefundNumber String?             @unique @db.VarChar(64)
+  amount              Decimal             @db.Decimal(12, 2)
+  currency            String              @db.VarChar(8)
+  status              PayHereRefundStatus
+  reason              PayHereRefundReason
+  /// Payment id while this attempt blocks another refund. Null after FAILED.
+  openRefundSlot      String?             @unique @db.VarChar(191)
+  /// True only when retrieval shows the previous request never started.
+  retrySafe           Boolean             @default(false)
+  failureMessage      String?             @db.VarChar(500)
+  providerStatus      Int?
+  /// status, msg, and refund number only. No tokens or card fields.
+  sanitizedResponse   Json?
+  initiatedAt         DateTime            @default(now())
+  lastReconciledAt    DateTime?
+  completedAt         DateTime?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  payment     Payment     @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Restrict)
+
+  @@index([paymentId, createdAt])
+  @@index([appointmentId])
+  @@index([status, updatedAt])
+}
+
+/// Customer saved card. The PayHere customer_token is stored only as
+/// AES-256-GCM ciphertext. Revocation and removal null those columns.
+model SavedPaymentMethod {
+  id                    String          @id @default(cuid())
+  userId                String
+  provider              PaymentProvider @default(PAYHERE)
+  status                SavedCardStatus
+  merchantReference     String          @unique
+  payherePaymentId      String?         @db.VarChar(64)
+  tokenCiphertext       String?         @db.Text
+  tokenIv               String?         @db.VarChar(32)
+  tokenTag              String?         @db.VarChar(32)
+  /// PayHere `method` when it is a short brand code such as VISA or MASTER.
+  cardBrand             String?         @db.VarChar(16)
+  /// Last four digits only when PayHere sends a masked card number.
+  cardLast4             String?         @db.VarChar(4)
+  consentVersion        String          @db.VarChar(32)
+  consentedAt           DateTime
+  authorizationEnabled  Boolean         @default(false)
+  revokedAt             DateTime?
+  removedAt             DateTime?
+  /// User id while this card is PENDING or ACTIVE. Null after it can be replaced.
+  openCardSlot          String?         @unique @db.VarChar(191)
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+
+  user   User                    @relation(fields: [userId], references: [id], onDelete: Restrict)
+  events SavedCardConsentEvent[]
+
+  @@index([userId, status])
+}
+
+model SavedCardConsentEvent {
+  id                   String                    @id @default(cuid())
+  userId               String
+  savedPaymentMethodId String
+  type                 SavedCardConsentEventType
+  consentVersion       String?                   @db.VarChar(32)
+  createdAt            DateTime                  @default(now())
+
+  user               User               @relation(fields: [userId], references: [id], onDelete: Restrict)
+  savedPaymentMethod SavedPaymentMethod @relation(fields: [savedPaymentMethodId], references: [id], onDelete: Restrict)
+
+  @@index([userId, createdAt])
+  @@index([savedPaymentMethodId])
 }
 
 /// Private object metadata. Bytes live in object storage, never in MySQL.

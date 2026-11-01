@@ -11,6 +11,9 @@ import { AdminUsersController } from './admin-users.controller';
 import { AstrologersModule } from '../astrologers/astrologers.module';
 import { ServicesModule } from '../services/services.module';
 import { WithdrawalsModule } from '../withdrawals/withdrawals.module';
+import { PaymentsModule } from '../payments/payments.module';
+import { AdminRefundsController } from './admin-refunds.controller';
+import { AdminSavedCardChargesController } from './admin-saved-card-charges.controller';
 
 @Module({
   imports: [
@@ -19,6 +22,7 @@ import { WithdrawalsModule } from '../withdrawals/withdrawals.module';
     ServicesModule,
     AstrologersModule,
     WithdrawalsModule,
+    PaymentsModule,
   ],
   controllers: [
     AdminAuthController,
@@ -26,6 +30,8 @@ import { WithdrawalsModule } from '../withdrawals/withdrawals.module';
     AdminServicesController,
     AdminAstrologersController,
     AdminFinanceController,
+    AdminRefundsController,
+    AdminSavedCardChargesController,
   ],
   providers: [AdminAuthService, AdminFinanceService],
 })

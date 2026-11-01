@@ -77,6 +77,7 @@ export class MockPaymentGateway implements PaymentGateway {
       amount,
       currency,
       success,
+      outcome: success ? 'success' : 'failed',
     };
   }
 

@@ -85,6 +85,9 @@ describe('ExpirySweepService', () => {
       financialSnapshotsCreated: 2,
       financialLedgersPosted: 1,
       abandonedUploadsRemoved: 0,
+      refundsStarted: 0,
+      refundsReconciled: 0,
+      chargesReconciled: 0,
       errors: [],
     });
   });

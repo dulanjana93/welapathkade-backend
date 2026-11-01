@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -14,6 +15,11 @@ import {
   UserStatus,
 } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
+import {
+  normalizeBillingInput,
+  toBillingProfileView,
+  type BillingProfileInput,
+} from './billing-profile';
 import { generateReferralCode } from '../common/crypto/hashing';
 import { hashPassword } from '../common/crypto/password';
 import { PrismaService } from '../prisma/prisma.service';
@@ -99,6 +105,42 @@ export class UsersService {
           ? (profile.application?.rejectionReason ?? null)
           : null,
     };
+  }
+
+  /**
+   * Billing details for the authenticated public customer. Incomplete rows
+   * are returned so the client can show what is still missing.
+   */
+  getBillingProfile(user: User) {
+    this.assertPublicCustomer(user);
+    return toBillingProfileView(user);
+  }
+
+  /**
+   * Creates or replaces billing columns on the authenticated customer.
+   * Account phone, display name, and login email are left unchanged.
+   */
+  async upsertBillingProfile(user: User, input: BillingProfileInput) {
+    this.assertPublicCustomer(user);
+    const billing = normalizeBillingInput(input);
+    const updated = await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        billingFirstName: billing.firstName,
+        billingLastName: billing.lastName,
+        billingEmail: billing.email,
+        billingAddress: billing.address,
+        billingCity: billing.city,
+        billingCountry: billing.country,
+      },
+    });
+    return toBillingProfileView(updated);
+  }
+
+  private assertPublicCustomer(user: User) {
+    if (user.role !== UserRole.PUBLIC) {
+      throw new ForbiddenException('PUBLIC role required');
+    }
   }
 
   findByPhone(phone: string): Promise<User | null> {

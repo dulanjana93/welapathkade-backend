@@ -194,8 +194,8 @@ appointment cannot be cancelled and has no automatic resolution path.
 | Completed | none | none | no | not created in this phase |
 
 `refundObligation` records that the customer is OWED a refund. It does not mean
-money was refunded: `Payment.status` is unchanged and no refund, ledger,
-earnings or referral record is created. Refund processing is a later phase.
+money was refunded. `PayHereRefund` is the gateway attempt and is created after
+the appointment lock commits. A ledger reversal is a third, separate record.
 
 Reliability incidents live in `AstrologerReliabilityIncident`
 (unique per appointment + type, so repeats cannot duplicate them).
@@ -432,7 +432,7 @@ Verified gateway results are applied by `PaymentsService.finalizeVerified`:
 | Failure | Fails only the attempt (if `PENDING`) and fails the payment once no attempt is pending, in one transaction. The appointment is untouched. Repeats are no-ops. |
 | Failure → success | The verified success is authoritative: a `FAILED` attempt/payment becomes `PAID` together with the confirmation, while the reservation hold is live. |
 | Success → failure | `PAID` is terminal. The late failure returns `alreadyPaid` and changes nothing. |
-| Success after hold expiry | Not confirmed (409); late-payment reconciliation/refund is a later phase. |
+| Success after hold expiry | Payment is marked paid, the appointment stays unconfirmed, `FULL_REFUND_DUE` is set, and a full PayHere refund is requested. The appointment is never confirmed. |
 
 Invariant: an appointment is `CONFIRMED` only together with a `PAID` payment.
 
@@ -777,3 +777,40 @@ SUCCESS PAYOUT → PROCESSING
 READ_ONLY conversation → new message
 
 Unless a specific Admin correction workflow explicitly supports an operation, normal business APIs must not bypass the state machine.
+
+## 21. Saved card and automatic-payment consent
+
+This is not a consultation payment state.
+
+| From | Event | To |
+|---|---|---|
+| none | Customer accepts the current consent and pre-approval starts | `PENDING`, `CONSENT_GRANTED` |
+| `PENDING` | Verified PayHere status `2` with `customer_token` | `ACTIVE`, authorization on, token encrypted |
+| `PENDING` | Verified status `0`, or success without a token | stays `PENDING` |
+| `PENDING` | Verified status `-1` or `-2` | `FAILED`, no token |
+| `PENDING` or `ACTIVE` | Customer revokes authorization | `DISABLED`, token deleted, `CONSENT_REVOKED` |
+| any except `REMOVED` | Customer removes the card | `REMOVED`, token deleted, authorization off, `CARD_REMOVED` |
+| `DISABLED`, `REMOVED`, or `FAILED` | Another pre-approval notification | unchanged |
+
+`DISABLED` and `REMOVED` cannot return to `ACTIVE`. A replacement card is a new row and needs a new `CONSENT_GRANTED`. The browser return URL is not a transition. Local revocation does not call a PayHere cancellation API. PayHere documents merchant-account cancellation only.
+
+## 22. Saved-card consultation charge
+
+This is a payment attempt. It does not start when the customer accepts a proposal. The customer must call `POST .../checkout/saved-card` with `confirmSavedCardPayment: true`. Manual checkout is unchanged.
+
+| From | Event | To |
+|---|---|---|
+| no open `sc_` attempt | Customer confirms the saved-card payment | `PENDING` attempt, `openChargeSlot` set, then one Charging API call |
+| `PENDING` and the request was not sent | Rate limit, OAuth failure, or revocation wins the dispatch lock | `FAILED`, slot cleared. A later explicit request may charge |
+| `PENDING` | Retrieval finds one matching `RECEIVED` payment while the 30-minute hold is live | `PAID`, appointment `CONFIRMED`, slot cleared |
+| `PENDING` | Retrieval finds one matching `RECEIVED` payment after the hold expired | `PAID`, appointment not confirmed, `FULL_REFUND_DUE`, existing refund flow, slot cleared |
+| `PENDING` | Charging response of any status, including HTTP 200, status `2`, or a checkout-formula `md5sig` | not final by itself. Retrieval must confirm it |
+| `PENDING` | Retrieval is empty, unavailable, mismatched, chargebacked, or has more than one `RECEIVED` row | stays `PENDING`, `requiresReview`, slot kept. No second charge |
+| `requiresReview` | Retrieval finds one matching `RECEIVED` payment | same as a verified capture |
+| `requiresReview` | Retrieval is empty, pending, mismatched, or has more than one match | stays `requiresReview` |
+
+A synchronous Charging API response is not proof of payment. PayHere Retrieval must return exactly one `RECEIVED` row for that order id, amount, and currency. A payment id on the synchronous response is checked against that row and is not proof by itself. Checkout notifications still use their own documented `md5sig`.
+
+Dispatch authorization is a `checkoutPayload.dispatchAuthorizedAt` value written in the same transaction as `SELECT … FOR UPDATE` on the saved card, after OAuth and before the charge POST. That transaction closes before the HTTP request. If revocation commits first, the POST is not sent. If dispatch authorization commits first, the charge is in flight: a later revocation deletes the token for future charges and does not cancel the request at PayHere or mark that attempt failed.
+
+Revoking or removing the card after the charge request was sent does not mark that attempt canceled. A new card registration requires a new consent before another charge. A delayed pre-approval notification cannot make a `DISABLED` or `REMOVED` card `ACTIVE` again.

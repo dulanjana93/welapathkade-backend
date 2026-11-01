@@ -17,4 +17,23 @@ export default registerAs('app', () => ({
   agoraAppCertificate: process.env.AGORA_APP_CERTIFICATE,
   allowShortNoticeTestAppointments:
     process.env.ALLOW_SHORT_NOTICE_TEST_APPOINTMENTS,
+  notifyLkUserId: process.env.NOTIFY_LK_USER_ID,
+  notifyLkApiKey: process.env.NOTIFY_LK_API_KEY,
+  notifyLkSenderId: process.env.NOTIFY_LK_SENDER_ID,
+  payhereMode: blank(process.env.PAYHERE_MODE)?.toLowerCase(),
+  payhereAllowSandbox: blank(process.env.PAYHERE_ALLOW_SANDBOX)?.toLowerCase(),
+  payhereMerchantId: blank(process.env.PAYHERE_MERCHANT_ID),
+  payhereMerchantSecret: blank(process.env.PAYHERE_MERCHANT_SECRET),
+  payhereCheckoutUrl: blank(process.env.PAYHERE_CHECKOUT_URL),
+  payhereOauthUrl: blank(process.env.PAYHERE_OAUTH_URL),
+  payhereAppId: blank(process.env.PAYHERE_APP_ID),
+  payhereAppSecret: blank(process.env.PAYHERE_APP_SECRET),
+  payhereNotifyUrl: blank(process.env.PAYHERE_NOTIFY_URL),
+  payhereReturnUrl: blank(process.env.PAYHERE_RETURN_URL),
+  payhereCancelUrl: blank(process.env.PAYHERE_CANCEL_URL),
 }));
+
+function blank(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}

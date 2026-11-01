@@ -3,14 +3,22 @@ import {
   ConflictException,
   ForbiddenException,
 } from '@nestjs/common';
-import { AppointmentStatus, PaymentStatus, UserRole } from '@prisma/client';
+import {
+  AppointmentStatus,
+  ConsultationStatus,
+  PaymentStatus,
+  RefundObligation,
+  UserRole,
+} from '@prisma/client';
 import { PaymentsService } from './payments.service';
+import { evaluateSettlementEligibility } from '../settlement/settlement-eligibility';
 
 describe('PaymentsService.finalizeVerified', () => {
   // Transaction client used by recordFailure (failure callbacks).
   const failureTx = {
     paymentAttempt: { updateMany: jest.fn(), count: jest.fn() },
     payment: { updateMany: jest.fn() },
+    appointment: { updateMany: jest.fn(), findUniqueOrThrow: jest.fn() },
   };
   const prisma = {
     paymentAttempt: {
@@ -104,6 +112,13 @@ describe('PaymentsService.finalizeVerified', () => {
     failureTx.paymentAttempt.updateMany.mockResolvedValue({ count: 1 });
     failureTx.paymentAttempt.count.mockResolvedValue(0);
     failureTx.payment.updateMany.mockResolvedValue({ count: 1 });
+    failureTx.appointment.updateMany.mockResolvedValue({ count: 1 });
+    failureTx.appointment.findUniqueOrThrow.mockResolvedValue({
+      ...appointment,
+      status: AppointmentStatus.PAYMENT_EXPIRED,
+      refundObligation: 'FULL_REFUND_DUE',
+      payments: [],
+    });
     tx.appointment.findUniqueOrThrow.mockResolvedValue({
       ...appointment,
       status: AppointmentStatus.CONFIRMED,
@@ -273,6 +288,10 @@ describe('PaymentsService.finalizeVerified', () => {
             id: 'att-1',
             status: { in: [PaymentStatus.PENDING, PaymentStatus.FAILED] },
           },
+          data: expect.objectContaining({
+            openChargeSlot: null,
+            requiresReview: false,
+          }),
         }),
       );
     });
@@ -509,16 +528,96 @@ describe('PaymentsService.finalizeVerified', () => {
         },
       },
     });
-    await expect(
-      service.finalizeVerified({
+    const result = await service.finalizeVerified({
+      merchantReference: 'wp_ref',
+      providerPaymentId: 'mock_wp_ref',
+      amount: '1500.00',
+      currency: 'LKR',
+      success: true,
+    });
+    expect(result).toMatchObject({ capturedAfterExpiry: true });
+    expect(result.appointment?.status).not.toBe(AppointmentStatus.CONFIRMED);
+    expect(tx.appointment.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('asks for a refund after a late capture and still does not confirm', async () => {
+    const refunds = {
+      requestForAppointment: jest.fn().mockResolvedValue({ outcome: 'recorded' }),
+    };
+    const svc = new PaymentsService(
+      prisma as never,
+      availability as never,
+      occupancy as never,
+      bookingGuard as never,
+      gateway as never,
+      notifications as never,
+      refunds as never,
+    );
+    prisma.paymentAttempt.findUnique.mockResolvedValue({
+      ...attempt,
+      payment: {
+        ...attempt.payment,
+        appointment: {
+          ...appointment,
+          reservationExpiresAt: new Date(Date.now() - 1000),
+        },
+      },
+    });
+    const result = await svc.finalizeVerified({
+      merchantReference: 'wp_ref',
+      providerPaymentId: 'mock_wp_ref',
+      amount: '1500.00',
+      currency: 'LKR',
+      success: true,
+    });
+    expect(result).toMatchObject({ capturedAfterExpiry: true });
+    expect(result.appointment?.status).not.toBe(AppointmentStatus.CONFIRMED);
+    expect(refunds.requestForAppointment).toHaveBeenCalledWith('apt-1');
+    expect(notifications.deliverAfterCommit).not.toHaveBeenCalled();
+  });
+
+  it('flags a chargeback for review and does not start a refund', async () => {
+    const localPrisma = {
+      paymentAttempt: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValueOnce({ id: 'att-1' })
+          .mockResolvedValueOnce({ payment: { appointmentId: 'apt-1' } }),
+      },
+      payHereNotification: { create: jest.fn().mockResolvedValue({ id: 'n-1' }) },
+      appointment: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+    };
+    const refunds = { requestForAppointment: jest.fn() };
+    const payhere = {
+      provider: 'PAYHERE',
+      verifyNotification: () => ({
+        outcome: 'chargedback',
+        success: false,
         merchantReference: 'wp_ref',
-        providerPaymentId: 'mock_wp_ref',
+        providerPaymentId: '320025014001',
+        statusCode: -3,
         amount: '1500.00',
         currency: 'LKR',
-        success: true,
+        sanitized: { status_code: '-3' },
       }),
-    ).rejects.toBeInstanceOf(ConflictException);
-    expect(tx.appointment.updateMany).not.toHaveBeenCalled();
+    };
+    const svc = new PaymentsService(
+      localPrisma as never,
+      availability as never,
+      occupancy as never,
+      bookingGuard as never,
+      payhere as never,
+      notifications as never,
+      refunds as never,
+    );
+    await expect(svc.handlePayHereNotify({})).resolves.toEqual({
+      chargedback: true,
+    });
+    expect(localPrisma.appointment.updateMany).toHaveBeenCalledWith({
+      where: { id: 'apt-1' },
+      data: { manualReviewRequired: true },
+    });
+    expect(refunds.requestForAppointment).not.toHaveBeenCalled();
   });
 
   it('duplicate callback on already-PAID is a no-op', async () => {
@@ -631,7 +730,7 @@ describe('PaymentsService.finalizeVerified', () => {
       expect(notifications.deliverAfterCommit).not.toHaveBeenCalled();
     });
 
-    it('does not notify when the reservation expired before the lock', async () => {
+    it('records a captured payment and refund obligation when the reservation expired before the lock', async () => {
       prisma.paymentAttempt.findUnique.mockResolvedValue({
         ...attempt,
         payment: {
@@ -642,23 +741,50 @@ describe('PaymentsService.finalizeVerified', () => {
           },
         },
       });
-      await expect(service.finalizeVerified(notify)).rejects.toBeInstanceOf(
-        ConflictException,
+      const result = await service.finalizeVerified(notify);
+      expect(result).toMatchObject({ capturedAfterExpiry: true });
+      expect(result.appointment?.status).toBe(AppointmentStatus.PAYMENT_EXPIRED);
+      expect(bookingGuard.withAstrologerLock).not.toHaveBeenCalled();
+      expect(failureTx.payment.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: PaymentStatus.PAID }),
+        }),
+      );
+      expect(failureTx.appointment.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            refundObligation: 'FULL_REFUND_DUE',
+          }),
+        }),
       );
       expect(notifications.notifyUser).not.toHaveBeenCalled();
       expect(notifications.deliverAfterCommit).not.toHaveBeenCalled();
+      const settlement = evaluateSettlementEligibility({
+        appointmentStatus: AppointmentStatus.COMPLETED,
+        consultationStatus: ConsultationStatus.COMPLETED,
+        completedAt: new Date(Date.now() - 48 * 60 * 60 * 1000),
+        paymentStatus: PaymentStatus.PAID,
+        paymentId: 'pay-1',
+        appointmentAmount: '1500.00',
+        paymentAmount: '1500.00',
+        refundObligation: RefundObligation.FULL_REFUND_DUE,
+        manualReviewRequired: false,
+        now: new Date(),
+      });
+      expect(settlement.eligible).toBe(false);
+      expect(settlement.reason).toBe('REFUND_OBLIGATION_BLOCKS_SETTLEMENT');
     });
 
-    it('does not notify when the reservation expired between the check and the lock', async () => {
+    it('does not confirm when the reservation expires inside the lock', async () => {
       tx.appointment.updateMany.mockResolvedValue({ count: 0 });
       tx.appointment.findUniqueOrThrow.mockResolvedValue({
         ...appointment,
         status: AppointmentStatus.PAYMENT_EXPIRED,
         payments: [],
       });
-      await expect(service.finalizeVerified(notify)).rejects.toBeInstanceOf(
-        ConflictException,
-      );
+      const result = await service.finalizeVerified(notify);
+      expect(result).toMatchObject({ capturedAfterExpiry: true });
+      expect(result.appointment?.status).not.toBe(AppointmentStatus.CONFIRMED);
       expect(notifications.notifyUser).not.toHaveBeenCalled();
       expect(notifications.notifyAstrologerProfile).not.toHaveBeenCalled();
       expect(notifications.deliverAfterCommit).not.toHaveBeenCalled();
@@ -716,7 +842,17 @@ describe('PaymentsService.finalizeVerified', () => {
 
       await expect(
         service.checkout(
-          { id: 'cust-1', role: UserRole.PUBLIC } as never,
+          {
+            id: 'cust-1',
+            role: UserRole.PUBLIC,
+            phone: '+94771234567',
+            billingFirstName: 'Nimal',
+            billingLastName: 'Perera',
+            billingEmail: 'nimal@example.com',
+            billingAddress: '12 Temple Road',
+            billingCity: 'Colombo',
+            billingCountry: 'Sri Lanka',
+          } as never,
           'c-1',
           'p-1',
         ),
@@ -732,5 +868,170 @@ describe('PaymentsService.finalizeVerified', () => {
         'p-1',
       ),
     ).rejects.toThrow(/PUBLIC role required/);
+  });
+
+  describe('checkout billing profile', () => {
+    const consultation = {
+      id: 'c-1',
+      customerId: 'cust-1',
+      astrologerId: 'ap-1',
+      status: 'ACCEPTED',
+      requestedPrice: '1500.00',
+    };
+    const proposal = {
+      id: 'p-1',
+      status: 'ACCEPTED',
+      proposedStartAt: new Date('2026-10-01T04:30:00.000Z'),
+      proposedEndAt: new Date('2026-10-01T05:00:00.000Z'),
+      durationMinutes: 30,
+    };
+    const readyCustomer = {
+      id: 'cust-1',
+      role: UserRole.PUBLIC,
+      name: 'Nimal',
+      phone: '+94771234567',
+      billingFirstName: 'Nimal',
+      billingLastName: 'Perera',
+      billingEmail: 'nimal@example.com',
+      billingAddress: '12 Temple Road',
+      billingCity: 'Colombo',
+      billingCountry: 'Sri Lanka',
+    };
+
+    function prepareAcceptedCheckout() {
+      (prisma as Record<string, unknown>).consultation = {
+        findUnique: jest.fn().mockResolvedValue(consultation),
+      };
+      (prisma as Record<string, unknown>).consultationProposal = {
+        findFirst: jest.fn().mockResolvedValue(proposal),
+      };
+    }
+
+    it('rejects an incomplete billing profile before any reservation', async () => {
+      prepareAcceptedCheckout();
+      occupancy.expireDueReservations.mockClear();
+
+      await expect(
+        service.checkout(
+          { id: 'cust-1', role: UserRole.PUBLIC, phone: '+94771234567' } as never,
+          'c-1',
+          'p-1',
+        ),
+      ).rejects.toMatchObject({
+        response: {
+          code: 'BILLING_PROFILE_INCOMPLETE',
+          missingFields: [
+            'firstName',
+            'lastName',
+            'email',
+            'address',
+            'city',
+            'country',
+          ],
+        },
+      });
+
+      expect(bookingGuard.withAstrologerLock).not.toHaveBeenCalled();
+      expect(occupancy.expireDueReservations).not.toHaveBeenCalled();
+    });
+
+    it('continues the existing checkout flow when billing is complete', async () => {
+      prepareAcceptedCheckout();
+      const createdAppointment = {
+        ...appointment,
+        payments: [] as unknown[],
+        sessionStartedAt: null,
+        sessionEndedAt: null,
+        actualDurationSeconds: null,
+        cancelledAt: null,
+        cancelReason: null,
+        noShowRecordedAt: null,
+        refundObligation: null,
+        manualReviewRequired: false,
+      };
+      (tx.appointment as Record<string, unknown>).findUnique = jest
+        .fn()
+        .mockResolvedValue(null);
+      (tx.appointment as Record<string, unknown>).create = jest
+        .fn()
+        .mockResolvedValue(createdAppointment);
+      (tx.appointment as Record<string, unknown>).findUniqueOrThrow = jest
+        .fn()
+        .mockResolvedValue(createdAppointment);
+      (tx.payment as unknown as { create: jest.Mock }).create = jest
+        .fn()
+        .mockResolvedValue({
+          id: 'pay-1',
+          status: PaymentStatus.PENDING,
+          attempts: [],
+        });
+      (tx.paymentAttempt as unknown as { create: jest.Mock }).create = jest
+        .fn()
+        .mockResolvedValue({ id: 'att-1' });
+      (
+        occupancy as { loadOccupiedIntervals: jest.Mock }
+      ).loadOccupiedIntervals = jest.fn().mockResolvedValue([]);
+      (availability as { assertProposedSlotEligible?: jest.Mock }).assertProposedSlotEligible =
+        jest.fn().mockResolvedValue(undefined);
+      (gateway as { createCheckout?: jest.Mock }).createCheckout = jest
+        .fn()
+        .mockResolvedValue({ checkout: { mock: true } });
+      (gateway as { chargePayment?: jest.Mock }).chargePayment = jest.fn();
+
+      const result = await service.checkout(readyCustomer as never, 'c-1', 'p-1');
+
+      expect(bookingGuard.withAstrologerLock).toHaveBeenCalled();
+      expect(
+        (tx.appointment as { create: jest.Mock }).create,
+      ).toHaveBeenCalled();
+      expect(
+        (tx as { payment: { create: jest.Mock } }).payment.create,
+      ).toHaveBeenCalled();
+      expect(
+        (tx as { paymentAttempt: { create: jest.Mock } }).paymentAttempt.create,
+      ).toHaveBeenCalled();
+      expect(result.checkout).toEqual({ mock: true });
+      expect(
+        (gateway as { chargePayment: jest.Mock }).chargePayment,
+      ).not.toHaveBeenCalled();
+      const attemptData = (
+        tx.paymentAttempt as unknown as { create: jest.Mock }
+      ).create.mock.calls[0][0].data;
+      expect(attemptData.merchantReference).toMatch(/^wp_/);
+      expect(JSON.stringify(attemptData)).not.toContain('customer_token');
+    });
+
+    it('does not start manual checkout over an open saved-card charge', async () => {
+      prepareAcceptedCheckout();
+      (tx.appointment as Record<string, unknown>).findUnique = jest
+        .fn()
+        .mockResolvedValue({
+          ...appointment,
+          status: AppointmentStatus.PAYMENT_PENDING,
+          reservationExpiresAt: new Date(Date.now() + 10 * 60 * 1000),
+          payments: [
+            {
+              attempts: [
+                {
+                  merchantReference: 'sc_open',
+                  status: PaymentStatus.PENDING,
+                  openChargeSlot: 'pay-1',
+                  requiresReview: true,
+                  createdAt: new Date(),
+                  checkoutPayload: null,
+                },
+              ],
+            },
+          ],
+        });
+      (gateway as { createCheckout?: jest.Mock }).createCheckout = jest.fn();
+
+      await expect(
+        service.checkout(readyCustomer as never, 'c-1', 'p-1'),
+      ).rejects.toThrow(/saved-card charge is already open/);
+      expect(
+        (gateway as { createCheckout: jest.Mock }).createCheckout,
+      ).not.toHaveBeenCalled();
+    });
   });
 });

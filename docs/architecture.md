@@ -143,6 +143,7 @@ account status
 language preference
 referral code
 referral relationship
+customer billing profile (`GET`/`PUT /me/billing`): first name, last name, billing email, address, city, and country. Nullable until the customer is ready to pay. The account phone is reused and is not stored again. Billing email is not the admin login email and does not change `User.name`. Checkout refuses to reserve a slot while any required billing field is missing or invalid (`BILLING_PROFILE_INCOMPLETE`).
 astrologers
 
 Responsible for:
@@ -213,6 +214,20 @@ payment records
 payment gateway integration
 webhook processing
 payment idempotency
+checkout billing gate: a public customer must have a complete billing profile before Confirm & Pay creates an appointment, payment, or payment attempt. An incomplete profile returns HTTP 400 `BILLING_PROFILE_INCOMPLETE` with `missingFields` and does not take the astrologer booking lock.
+PayHere sandbox and live checkout (`PayHereGateway`). Development and test keep `MockPaymentGateway` unless `PAYHERE_MODE=sandbox`. Production requires `PAYHERE_MODE=live` and refuses the mock gateway. Checkout returns a form POST (`action` plus `fields`, including a server-side hash). The merchant secret is not in the response. `POST /payments/callbacks/payhere` accepts `application/x-www-form-urlencoded`, checks `md5sig`, and ignores card fields. Status `2` confirms a live 30-minute hold. A verified capture after that hold marks the payment paid, sets `FULL_REFUND_DUE`, leaves the appointment unconfirmed, and then requests a full PayHere refund of the captured consultation amount. Customer return uses Retrieval (`GET /merchant/v1/payment/search`) and is not proof by itself. The checkout amount is the consultation price. Settlement stays 80% / 3% / platform residual of that price. Gateway fees are not added to the refund.
+
+Saved cards are separate from consultation payments. `POST /me/payment-methods/preapproval` requires a complete billing profile and `acceptAutomaticPaymentConsent: true`. The form is posted to PayHere’s pre-approval URL and omits `amount`. The hash uses the documented LKR value `10.00`, which is not a consultation charge. PayHere’s automated-charging guide says the card verification charges Rs. 1.00 and refunds it immediately. That notification is matched by an order id starting with `pa_` and never creates an appointment, consultation payment, wallet credit, snapshot, or ledger row. The browser return URL does not activate the card. A verified status `2` with `customer_token` encrypts the token with the existing AES-256-GCM bank-account key and marks the card `ACTIVE`. Revoking or removing the card deletes that ciphertext immediately. PayHere does not offer a customer or server API to cancel the provider-side pre-approval. Cancellation of that pre-approval is a separate action in the PayHere merchant account (Payments, Preapprovals). Local revocation still makes the token unusable by Welapathkade. Automatic charging is a separate customer action, `POST /consultations/:consultationId/proposals/:proposalId/checkout/saved-card`, and only runs when the body is `confirmSavedCardPayment: true`. Accepting a proposal does not charge the card. The server loads the consultation price, reserves the existing 30-minute hold, stores one `sc_` payment attempt, and then calls PayHere `POST /merchant/v1/payment/charge` with `type: PAYMENT`. The customer token is decrypted only for that request and is not returned, logged, or stored on the attempt. Manual checkout stays `POST .../checkout` and does not require a saved card. A repeated saved-card request returns the open attempt and does not send another charge. A timeout, an unauthenticated response, or status `0` sets `PaymentAttempt.requiresReview` and keeps `openChargeSlot` until Retrieval matches that same order. Status `2` with a matching signature uses the existing payment finalizer: a live hold is confirmed, and a capture after the hold expires is marked paid with `FULL_REFUND_DUE` and the existing full-refund flow. Status `-1` and `-2` with a valid signature do not confirm. The Charging API shows `md5sig` without its own formula, so the documented checkout notification formula is used. A mismatch stays unresolved. `AUTHORIZE` is not used. Live charging still needs PayHere’s domain and IP whitelist, which is not configured here.
+
+Refund words are separate:
+
+- Refund obligation: `Appointment.refundObligation = FULL_REFUND_DUE`. The customer is owed a refund. Settlement stays blocked while it is set. It is not cleared when PayHere accepts a refund.
+- Refund request: `POST /merchant/v1/payment/refund` with the stored PayHere `payment_id` and a fixed description. The amount is omitted so PayHere refunds the captured payment. The amount is never taken from the client.
+- Refund processing: internal status `PROCESSING`, or Retrieval status `REFUND REQUESTED` / `REFUND PROCESSING`. Another refund is not sent.
+- Confirmed refund: PayHere response status `1` with a refund number, or Retrieval status `REFUNDED`. Internal status `SUCCEEDED`.
+- Financial ledger reversal: `FinancialLedgerService.reversePostedSnapshotForRefundObligation`. It claws back an already posted snapshot and is idempotent. It does not prove PayHere refunded the customer, and a PayHere success does not by itself prove the reversal ran. Refund initiation does not create wallet credits.
+
+Status `0`, a timeout, or a dropped connection becomes `REQUIRES_REVIEW` and is not retried until Retrieval shows the payment is still `RECEIVED` (the request never started). Status `-1` is a recorded failure and is also not retried until that same retrieval result. Admin retry is `POST /admin/finance/refunds/:id/retry`. Admins list and inspect refunds at `GET /admin/finance/refunds` and reconcile with `POST /admin/finance/refunds/reconcile`. The expiry sweep starts due refunds that have no refund row yet and reconciles unresolved rows. It does not add a queue. A chargeback (notify status `-3` or Retrieval `CHARGEBACKED`) is not a successful payment, does not start a refund, and sets `manualReviewRequired` so a new settlement credit is blocked. This phase does not reverse a snapshot that was already posted for a chargeback.
 financials
 
 Responsible for:
@@ -715,9 +730,12 @@ Example:
 
 DATABASE_URL
 REDIS_URL
-JWT_SECRET
+JWT_ACCESS_SECRET
+JWT_REFRESH_SECRET
 FCM credentials
-NOTIFY credentials
+NOTIFY_LK_USER_ID
+NOTIFY_LK_API_KEY
+NOTIFY_LK_SENDER_ID
 R2 credentials
 PAYMENT_GATEWAY credentials
 CALL_PROVIDER credentials
@@ -748,6 +766,8 @@ Use:
 
 Nginx
 HTTPS
+
+Production OTP SMS is sent through Notify.lk. Set `NOTIFY_LK_USER_ID`, `NOTIFY_LK_API_KEY`, and `NOTIFY_LK_SENDER_ID` outside the repository. The sender ID must be approved in the Notify.lk dashboard before production OTP delivery. `NotifyDEMO` cannot be used for OTP.
 
 Production MySQL backups should exist independently of the application container/server lifecycle.
 

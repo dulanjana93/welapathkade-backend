@@ -21,6 +21,7 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import {
+  ApiBadRequestResponse,
   ApiBearerAuth,
   ApiBody,
   ApiConsumes,
@@ -208,7 +209,22 @@ export class ConsultationsController {
   @Roles(UserRole.PUBLIC)
   @ApiOperation({
     summary:
-      'Confirm & Pay: reserve the accepted proposal slot and start mock checkout. Amount is server-side only.',
+      'Confirm & Pay: reserve the accepted proposal slot and start checkout. Amount is server-side only. The mock gateway returns a mock payload in development. PayHere returns a form POST to the sandbox or live checkout URL. The merchant secret is never included.',
+    description:
+      'Requires a complete customer billing profile (first name, last name, billing email, account phone, address, city, and country). If it is incomplete, responds 400 with code BILLING_PROFILE_INCOMPLETE and missingFields. No appointment, payment, payment attempt, or astrologer slot reservation is created in that case. This route is the manual PayHere checkout. It does not charge a saved card. Saved-card payment is POST .../checkout/saved-card and requires an explicit confirmation.',
+  })
+  @ApiBadRequestResponse({
+    description:
+      'Billing profile is incomplete. Body includes code BILLING_PROFILE_INCOMPLETE and missingFields. Consultation and proposal rules are unchanged.',
+    schema: {
+      example: {
+        statusCode: 400,
+        message: 'Billing profile is incomplete',
+        error: 'Bad Request',
+        code: 'BILLING_PROFILE_INCOMPLETE',
+        missingFields: ['firstName', 'lastName', 'email', 'address', 'city', 'country'],
+      },
+    },
   })
   checkout(
     @CurrentUser() user: User,

@@ -17,6 +17,23 @@ const s3Env = {
   S3_SECRET_ACCESS_KEY: 'secret-key',
 };
 
+const notifyEnv = {
+  NOTIFY_LK_USER_ID: 'notify-user',
+  NOTIFY_LK_API_KEY: 'notify-key',
+  NOTIFY_LK_SENDER_ID: 'Welapathkade',
+};
+
+const payhereEnv = {
+  PAYHERE_MODE: 'live',
+  PAYHERE_MERCHANT_ID: 'merchant-1',
+  PAYHERE_MERCHANT_SECRET: 'merchant-secret',
+  PAYHERE_APP_ID: 'app-id',
+  PAYHERE_APP_SECRET: 'app-secret',
+  PAYHERE_NOTIFY_URL: 'https://api.example.com/payments/callbacks/payhere',
+  PAYHERE_RETURN_URL: 'https://app.example.com/payments/return',
+  PAYHERE_CANCEL_URL: 'https://app.example.com/payments/cancel',
+};
+
 const baseEnv = {
   NODE_ENV: 'development',
   PORT: '3010',
@@ -99,6 +116,8 @@ describe('short-notice test appointment override', () => {
       validateEnv({
         ...baseEnv,
         ...s3Env,
+        ...notifyEnv,
+        ...payhereEnv,
         NODE_ENV: 'production',
         CORS_ORIGINS: 'https://example.com',
       }),
@@ -107,6 +126,8 @@ describe('short-notice test appointment override', () => {
       validateEnv({
         ...baseEnv,
         ...s3Env,
+        ...notifyEnv,
+        ...payhereEnv,
         NODE_ENV: 'production',
         ALLOW_SHORT_NOTICE_TEST_APPOINTMENTS: 'false',
         CORS_ORIGINS: 'https://example.com',

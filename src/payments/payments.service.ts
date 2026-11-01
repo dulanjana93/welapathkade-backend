@@ -5,17 +5,19 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import {
   AppointmentStatus,
   ConsultationStatus,
   PaymentProvider,
   PaymentStatus,
+  Prisma,
   ProposalStatus,
+  RefundObligation,
   User,
   UserRole,
   type Appointment,
-  Prisma,
   type Payment,
   type PaymentAttempt,
 } from '@prisma/client';
@@ -32,12 +34,20 @@ import { NotificationService } from '../notifications/notification.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { isMockPaymentCallbackAllowed } from '../config/runtime-safety';
 import {
+  assessBillingProfile,
+  billingProfileIncompleteException,
+} from '../users/billing-profile';
+import { PayHereNotificationError } from './payhere/payhere-signature';
+import type { PayHereGateway } from './payhere/payhere.gateway';
+import type { PaymentNotifyOutcome } from './payment-gateway';
+import {
   toAppointmentView,
   toAstrologerAppointmentView,
   toCheckoutView,
 } from './appointment.mapper';
 import { CHECKOUT_BLOCKED_STATUSES } from './appointment.state';
 import { PAYMENT_GATEWAY, type PaymentGateway } from './payment-gateway';
+import { PayHereRefundService } from './payhere-refund.service';
 
 const appointmentInclude = {
   payments: { include: { attempts: true } },
@@ -56,6 +66,7 @@ export class PaymentsService {
     private readonly bookingGuard: BookingGuardService,
     @Inject(PAYMENT_GATEWAY) private readonly gateway: PaymentGateway,
     private readonly notifications: NotificationService,
+    @Optional() private readonly refunds?: PayHereRefundService,
   ) {}
 
   async checkout(user: User, consultationId: string, proposalId: string) {
@@ -85,6 +96,11 @@ export class PaymentsService {
       throw new ConflictException(
         `Cannot checkout proposal in status ${proposal.status}`,
       );
+    }
+
+    const billing = assessBillingProfile(user);
+    if (!billing.complete) {
+      throw billingProfileIncompleteException(billing.missingFields);
     }
 
     const amount = toMoneyString(consultation.requestedPrice);
@@ -117,21 +133,28 @@ export class PaymentsService {
           existing.reservationExpiresAt.getTime() > now.getTime()
         ) {
           const latest = latestAttempt(existing);
-          const checkout =
-            (latest?.checkoutPayload as Record<string, unknown> | null) ??
-            (
-              await this.gateway.createCheckout({
-                merchantReference:
-                  latest?.merchantReference ??
-                  this.newMerchantReference(existing.id),
-                amount,
-                currency: existing.currency,
-                appointmentId: existing.id,
-                consultationId,
-                customer: { id: user.id, name: user.name, phone: user.phone },
-              })
-            ).checkout;
-          return toCheckoutView(existing, checkout);
+          if (savedCardChargeStillOpen(latest)) {
+            throw new ConflictException(
+              'A saved-card charge is already open for this appointment',
+            );
+          }
+          if (!latest?.merchantReference.startsWith('sc_')) {
+            const checkout =
+              (latest?.checkoutPayload as Record<string, unknown> | null) ??
+              (
+                await this.gateway.createCheckout({
+                  merchantReference:
+                    latest?.merchantReference ??
+                    this.newMerchantReference(existing.id),
+                  amount,
+                  currency: existing.currency,
+                  appointmentId: existing.id,
+                  consultationId,
+                  customer: this.checkoutCustomer(user),
+                })
+              ).checkout;
+            return toCheckoutView(existing, checkout);
+          }
         }
 
         const occupied = await this.occupancy.loadOccupiedIntervals({
@@ -196,7 +219,7 @@ export class PaymentsService {
               amount: consultation.requestedPrice,
               currency: PAYMENT_CURRENCY,
               status: PaymentStatus.PENDING,
-              provider: PaymentProvider.MOCK,
+              provider: this.paymentProvider(),
             },
             include: { attempts: true },
           });
@@ -208,6 +231,7 @@ export class PaymentsService {
               amount: consultation.requestedPrice,
               currency: PAYMENT_CURRENCY,
               paidAt: null,
+              provider: this.paymentProvider(),
             },
             include: { attempts: true },
           });
@@ -220,13 +244,13 @@ export class PaymentsService {
           currency: PAYMENT_CURRENCY,
           appointmentId: appointment.id,
           consultationId,
-          customer: { id: user.id, name: user.name, phone: user.phone },
+          customer: this.checkoutCustomer(user),
         });
 
         await tx.paymentAttempt.create({
           data: {
             paymentId: payment.id,
-            provider: PaymentProvider.MOCK,
+            provider: this.paymentProvider(),
             merchantReference,
             status: PaymentStatus.PENDING,
             checkoutPayload: checkout as Prisma.InputJsonValue,
@@ -322,21 +346,23 @@ export class PaymentsService {
       return view;
     }
 
-    const verified = await this.gateway.verifyByReference(reference);
-    // A verified result without its own amount and currency is not enough to
-    // confirm anything: never substitute the expected values.
-    if (verified.success && verified.amount && verified.currency) {
-      await this.finalizeVerified({
-        merchantReference: reference,
-        providerPaymentId: verified.providerPaymentId ?? `verify_${reference}`,
-        amount: verified.amount,
-        currency: verified.currency,
-        success: true,
-        raw: { source: 'sync' },
-      });
-      return this.getForCustomer(user, consultationId);
+    const verified = await this.gateway.verifyByReference(reference, {
+      amount: view.amount,
+      currency: view.currency,
+    });
+    if (!verified.success || verified.ambiguous || !verified.amount || !verified.currency) {
+      return view;
     }
-    return view;
+    await this.finalizeVerified({
+      merchantReference: reference,
+      providerPaymentId: verified.providerPaymentId ?? `verify_${reference}`,
+      amount: verified.amount,
+      currency: verified.currency,
+      success: true,
+      outcome: 'success',
+      raw: { source: 'sync' },
+    });
+    return this.getForCustomer(user, consultationId);
   }
 
   async handleMockNotify(
@@ -357,6 +383,53 @@ export class PaymentsService {
     return this.finalizeVerified({
       ...(await this.withStoredCheckoutValues(notify)),
       raw: safeJson(rawBody),
+    });
+  }
+
+  /**
+   * PayHere server notification. The return URL is not accepted here.
+   * Card fields are removed before anything is stored.
+   */
+  async handlePayHereNotify(fields: Record<string, string>) {
+    if (this.gateway.provider !== 'PAYHERE') {
+      throw new NotFoundException('PayHere notifications are not enabled');
+    }
+    const gateway = this.gateway as PayHereGateway;
+    let parsed: ReturnType<PayHereGateway['verifyNotification']>;
+    try {
+      parsed = gateway.verifyNotification(fields);
+    } catch (error) {
+      if (error instanceof PayHereNotificationError) {
+        throw new BadRequestException('Invalid PayHere notification');
+      }
+      throw new BadRequestException('Malformed PayHere notification');
+    }
+
+    const attempt = await this.prisma.paymentAttempt.findUnique({
+      where: { merchantReference: parsed.merchantReference },
+      select: { id: true },
+    });
+    if (!attempt) {
+      throw new NotFoundException('Payment attempt not found');
+    }
+    await this.recordPayHereNotification(parsed);
+
+    if (parsed.outcome === 'pending') {
+      return { pending: true };
+    }
+    if (parsed.outcome === 'chargedback') {
+      await this.flagChargebackForReview(parsed.merchantReference);
+      return { chargedback: true };
+    }
+    return this.finalizeVerified({
+      merchantReference: parsed.merchantReference,
+      providerPaymentId:
+        parsed.providerPaymentId || `payhere_${parsed.merchantReference}`,
+      amount: parsed.amount,
+      currency: parsed.currency,
+      success: parsed.success,
+      outcome: parsed.outcome,
+      raw: parsed.sanitized,
     });
   }
 
@@ -397,6 +470,7 @@ export class PaymentsService {
     amount: string;
     currency: string;
     success: boolean;
+    outcome?: PaymentNotifyOutcome;
     raw?: Prisma.InputJsonValue;
   }) {
     const attempt = await this.prisma.paymentAttempt.findUnique({
@@ -415,36 +489,71 @@ export class PaymentsService {
     const appointment = payment.appointment;
     const expectedAmount = toMoneyString(appointment.amount);
     const now = new Date();
+    const outcome: PaymentNotifyOutcome =
+      notify.outcome ?? (notify.success ? 'success' : 'failed');
 
     if (notify.raw) {
       await this.prisma.paymentAttempt.update({
         where: { id: attempt.id },
         data: {
-          rawNotifyPayload: notify.raw,
+          rawNotifyPayload: stripCardFields(notify.raw),
           providerPaymentId:
-            attempt.providerPaymentId ?? notify.providerPaymentId,
+            attempt.providerPaymentId ??
+            (notify.providerPaymentId || null),
         },
       });
     }
 
-    if (payment.status === PaymentStatus.PAID) {
+    if (outcome === 'chargedback') {
+      return { chargedback: true };
+    }
+    if (outcome === 'pending') {
+      return { pending: true };
+    }
+
+    const holdLive =
+      appointment.status === AppointmentStatus.PAYMENT_PENDING &&
+      appointment.reservationExpiresAt.getTime() > now.getTime();
+
+    if (payment.status === PaymentStatus.PAID && !notify.success) {
       return {
         alreadyPaid: true,
-        appointment: toAppointmentView(
-          await this.prisma.appointment.findUniqueOrThrow({
-            where: { id: appointment.id },
-            include: appointmentInclude,
-          }),
-        ),
+        appointment: await this.reloadAppointment(appointment.id),
+      };
+    }
+
+    if (
+      payment.status === PaymentStatus.PAID &&
+      (appointment.status === AppointmentStatus.CONFIRMED || holdLive)
+    ) {
+      return {
+        alreadyPaid: true,
+        appointment: await this.reloadAppointment(appointment.id),
+      };
+    }
+
+    if (payment.status === PaymentStatus.PAID) {
+      const row = await this.prisma.$transaction((tx) =>
+        this.persistCapturedAfterExpiry(tx, {
+          attemptId: attempt.id,
+          paymentId: payment.id,
+          appointmentId: appointment.id,
+          providerPaymentId: notify.providerPaymentId,
+          now,
+        }),
+      );
+      await this.noteCapturedRefund(appointment.id);
+      return {
+        capturedAfterExpiry: true,
+        alreadyRecorded: true,
+        appointment: toAppointmentView(row),
       };
     }
 
     // Callback ordering:
-    //  - success then failure: PAID is terminal; the late failure returned
-    //    above as `alreadyPaid` and changes nothing.
-    //  - failure then success: a failure only fails the attempt (and the
-    //    payment once no attempt is pending); a later verified success is
-    //    authoritative and is accepted below while the hold is live.
+    //  - success then failure: a confirmed PAID payment ignores the late failure.
+    //  - failure then success: a later verified success is authoritative while
+    //    the hold is still live.
     if (!notify.success) {
       await this.recordFailure(attempt.id, payment.id);
       return { failed: true };
@@ -474,22 +583,24 @@ export class PaymentsService {
       );
     }
 
-    if (
+    const capturedHold =
       appointment.status !== AppointmentStatus.PAYMENT_PENDING ||
-      appointment.reservationExpiresAt.getTime() <= now.getTime()
-    ) {
-      await this.occupancy.expireDueReservations(now);
-      await this.prisma.paymentAttempt.updateMany({
-        where: { id: attempt.id, status: PaymentStatus.PENDING },
-        data: { status: PaymentStatus.EXPIRED },
-      });
-      await this.prisma.payment.updateMany({
-        where: { id: payment.id, status: PaymentStatus.PENDING },
-        data: { status: PaymentStatus.EXPIRED },
-      });
-      throw new ConflictException(
-        'Reservation has expired; payment will not confirm the appointment',
+      appointment.reservationExpiresAt.getTime() <= now.getTime();
+    if (capturedHold) {
+      const row = await this.prisma.$transaction((tx) =>
+        this.persistCapturedAfterExpiry(tx, {
+          attemptId: attempt.id,
+          paymentId: payment.id,
+          appointmentId: appointment.id,
+          providerPaymentId: notify.providerPaymentId,
+          now,
+        }),
       );
+      await this.noteCapturedRefund(appointment.id);
+      return {
+        capturedAfterExpiry: true,
+        appointment: toAppointmentView(row),
+      };
     }
 
     const confirmed = await this.bookingGuard.withAstrologerLock(
@@ -521,6 +632,22 @@ export class PaymentsService {
               notificationIds: [] as Array<string | null>,
             };
           }
+          if (
+            current.status === AppointmentStatus.PAYMENT_EXPIRED ||
+            current.reservationExpiresAt.getTime() <= now.getTime()
+          ) {
+            return {
+              row: await this.persistCapturedAfterExpiry(tx, {
+                attemptId: attempt.id,
+                paymentId: payment.id,
+                appointmentId: appointment.id,
+                providerPaymentId: notify.providerPaymentId,
+                now,
+              }),
+              notificationIds: [] as Array<string | null>,
+              capturedAfterExpiry: true,
+            };
+          }
           throw new ConflictException(
             'Reservation has expired; payment will not confirm the appointment',
           );
@@ -550,6 +677,8 @@ export class PaymentsService {
           data: {
             status: PaymentStatus.PAID,
             providerPaymentId: notify.providerPaymentId,
+            requiresReview: false,
+            openChargeSlot: null,
           },
         });
 
@@ -581,6 +710,14 @@ export class PaymentsService {
       },
     );
 
+    if ('capturedAfterExpiry' in confirmed && confirmed.capturedAfterExpiry) {
+      await this.noteCapturedRefund(appointment.id);
+      return {
+        capturedAfterExpiry: true,
+        appointment: toAppointmentView(confirmed.row),
+      };
+    }
+
     // Lock released and transaction committed: start delivery now.
     this.notifications.deliverAfterCommit(confirmed.notificationIds);
 
@@ -592,6 +729,33 @@ export class PaymentsService {
    * failed only when no other attempt is still pending. One transaction, so the
    * attempt/payment pair never diverges. Never touches PAID/EXPIRED rows.
    */
+  private async noteCapturedRefund(appointmentId: string) {
+    if (!this.refunds) return;
+    try {
+      await this.refunds.requestForAppointment(appointmentId);
+    } catch {
+      // The payment and FULL_REFUND_DUE are already committed. The sweep can
+      // start the refund later. A thrown error must not undo the capture.
+    }
+  }
+
+  /**
+   * Status -3 is not a successful payment and does not start a refund.
+   * Manual review blocks a later settlement credit. A snapshot that was already
+   * posted is not reversed here.
+   */
+  private async flagChargebackForReview(merchantReference: string) {
+    const attempt = await this.prisma.paymentAttempt.findUnique({
+      where: { merchantReference },
+      select: { payment: { select: { appointmentId: true } } },
+    });
+    if (!attempt) return;
+    await this.prisma.appointment.updateMany({
+      where: { id: attempt.payment.appointmentId },
+      data: { manualReviewRequired: true },
+    });
+  }
+
   private async recordFailure(attemptId: string, paymentId: string) {
     await this.prisma.$transaction(async (tx) => {
       await tx.paymentAttempt.updateMany({
@@ -610,9 +774,167 @@ export class PaymentsService {
     });
   }
 
+  private async reloadAppointment(appointmentId: string) {
+    return toAppointmentView(
+      await this.prisma.appointment.findUniqueOrThrow({
+        where: { id: appointmentId },
+        include: appointmentInclude,
+      }),
+    );
+  }
+
+  private paymentProvider(): PaymentProvider {
+    return this.gateway.provider === 'PAYHERE'
+      ? PaymentProvider.PAYHERE
+      : PaymentProvider.MOCK;
+  }
+
+  private checkoutCustomer(user: User) {
+    const billing = assessBillingProfile(user);
+    return {
+      id: user.id,
+      name: user.name,
+      phone: user.phone,
+      firstName: billing.firstName ?? undefined,
+      lastName: billing.lastName ?? undefined,
+      email: billing.email ?? undefined,
+      address: billing.address ?? undefined,
+      city: billing.city ?? undefined,
+      country: billing.country ?? undefined,
+    };
+  }
+
+  private async recordPayHereNotification(
+    parsed: ReturnType<PayHereGateway['verifyNotification']>,
+  ) {
+    let amount: Prisma.Decimal | null = null;
+    try {
+      amount = parsed.amount ? new Prisma.Decimal(parsed.amount) : null;
+    } catch {
+      amount = null;
+    }
+    try {
+      await this.prisma.payHereNotification.create({
+        data: {
+          merchantReference: parsed.merchantReference,
+          payherePaymentId: parsed.providerPaymentId,
+          statusCode: parsed.statusCode,
+          amount,
+          currency: parsed.currency || null,
+        },
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * A verified capture after the 30-minute hold. The appointment is not
+   * confirmed, the slot is not held, and the refund is only an obligation.
+   */
+  private async persistCapturedAfterExpiry(
+    tx: Prisma.TransactionClient,
+    input: {
+      attemptId: string;
+      paymentId: string;
+      appointmentId: string;
+      providerPaymentId: string;
+      now: Date;
+    },
+  ) {
+    await tx.payment.updateMany({
+      where: {
+        id: input.paymentId,
+        status: {
+          in: [
+            PaymentStatus.PENDING,
+            PaymentStatus.FAILED,
+            PaymentStatus.EXPIRED,
+          ],
+        },
+      },
+      data: { status: PaymentStatus.PAID, paidAt: input.now },
+    });
+    await tx.paymentAttempt.updateMany({
+      where: {
+        id: input.attemptId,
+        status: {
+          in: [
+            PaymentStatus.PENDING,
+            PaymentStatus.FAILED,
+            PaymentStatus.EXPIRED,
+          ],
+        },
+      },
+      data: {
+        status: PaymentStatus.PAID,
+        providerPaymentId: input.providerPaymentId || null,
+        requiresReview: false,
+        openChargeSlot: null,
+      },
+    });
+    await tx.appointment.updateMany({
+      where: {
+        id: input.appointmentId,
+        status: AppointmentStatus.PAYMENT_PENDING,
+        reservationExpiresAt: { lte: input.now },
+      },
+      data: { status: AppointmentStatus.PAYMENT_EXPIRED },
+    });
+    await tx.appointment.updateMany({
+      where: {
+        id: input.appointmentId,
+        status: { not: AppointmentStatus.CONFIRMED },
+        refundObligation: null,
+      },
+      data: {
+        refundObligation: RefundObligation.FULL_REFUND_DUE,
+        refundObligationRecordedAt: input.now,
+      },
+    });
+    return tx.appointment.findUniqueOrThrow({
+      where: { id: input.appointmentId },
+      include: appointmentInclude,
+    });
+  }
+
   private newMerchantReference(appointmentId: string) {
     return `wp_${appointmentId}_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
   }
+}
+
+function stripCardFields(value: Prisma.InputJsonValue): Prisma.InputJsonValue {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const copy = { ...(value as Record<string, Prisma.InputJsonValue>) };
+  delete copy.card_holder_name;
+  delete copy.card_no;
+  delete copy.card_expiry;
+  delete copy.md5sig;
+  delete copy.customer_token;
+  delete copy.authorization_token;
+  return copy;
+}
+
+function savedCardChargeStillOpen(attempt: {
+  openChargeSlot?: string | null;
+  requiresReview?: boolean;
+  merchantReference?: string;
+  status?: PaymentStatus;
+} | undefined): boolean {
+  if (!attempt) return false;
+  if (attempt.openChargeSlot) return true;
+  if (attempt.requiresReview) return true;
+  return (
+    typeof attempt.merchantReference === 'string' &&
+    attempt.merchantReference.startsWith('sc_') &&
+    attempt.status === PaymentStatus.PENDING
+  );
 }
 
 function latestAttempt(appointment: AppointmentLoaded) {

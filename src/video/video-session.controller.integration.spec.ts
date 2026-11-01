@@ -12,6 +12,7 @@ import { App } from 'supertest/types';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { AstrologerConsultationsController } from '../consultations/astrologer-consultations.controller';
+import { ConsultationAttachmentsService } from '../consultations/consultation-attachments.service';
 import { ConsultationFollowUpService } from '../consultations/consultation-follow-up.service';
 import { ConsultationProposalsService } from '../consultations/consultation-proposals.service';
 import { ConsultationReviewsService } from '../consultations/consultation-reviews.service';
@@ -37,6 +38,7 @@ describe('video-session controllers (integration)', () => {
           useValue: { issueCredentialsForConsultation: issue },
         },
         { provide: ConsultationsService, useValue: {} },
+        { provide: ConsultationAttachmentsService, useValue: {} },
         { provide: ConsultationProposalsService, useValue: {} },
         { provide: ConsultationFollowUpService, useValue: {} },
         { provide: ConsultationReviewsService, useValue: {} },
@@ -72,7 +74,7 @@ describe('video-session controllers (integration)', () => {
   });
 
   afterAll(async () => {
-    await app.close();
+    await app?.close();
   });
 
   beforeEach(() => {

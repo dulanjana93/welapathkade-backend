@@ -15,6 +15,8 @@ export type PaymentAttemptView = {
   status: PaymentStatus;
   provider: string;
   createdAt: string;
+  /** True when a saved-card charge was sent and its outcome is still unknown. */
+  reconciliationRequired: boolean;
 };
 
 export type PaymentView = {
@@ -121,6 +123,7 @@ export function toAppointmentView(
                 status: latest.status,
                 provider: latest.provider,
                 createdAt: latest.createdAt.toISOString(),
+                reconciliationRequired: latest.requiresReview === true,
               }
             : null,
         }

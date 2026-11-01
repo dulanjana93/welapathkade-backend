@@ -1,10 +1,12 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { OccupancyService } from '../availability/occupancy.service';
 import { expirePendingConsultations } from '../consultations/consultation-expiry';
 import { PrismaService } from '../prisma/prisma.service';
 import { FinancialLedgerService } from '../settlement/financial-ledger.service';
 import { FinancialSnapshotService } from '../settlement/financial-snapshot.service';
 import { ConsultationAttachmentsService } from '../consultations/consultation-attachments.service';
+import { PayHereRefundService } from '../payments/payhere-refund.service';
+import { SavedCardChargeService } from '../payments/saved-card-charge.service';
 import { SessionCompletionSweepService } from './session-completion-sweep.service';
 
 export type ExpirySweepResult = {
@@ -36,6 +38,12 @@ export type ExpirySweepResult = {
    * Linked files are not deleted on decline, cancel, or expiry.
    */
   abandonedUploadsRemoved: number;
+  /** PayHere refunds started for obligations that had no refund row yet. */
+  refundsStarted: number;
+  /** Unresolved PayHere refunds checked through Retrieval. */
+  refundsReconciled: number;
+  /** Uncertain saved-card charges checked through Retrieval. Does not charge again. */
+  chargesReconciled: number;
   /** One message per failed step; a failed step never blocks the others. */
   errors: string[];
 };
@@ -69,6 +77,8 @@ export class ExpirySweepService {
     private readonly financialSnapshots: FinancialSnapshotService,
     private readonly financialLedger: FinancialLedgerService,
     private readonly attachments: ConsultationAttachmentsService,
+    @Optional() private readonly refunds?: PayHereRefundService,
+    @Optional() private readonly charges?: SavedCardChargeService,
   ) {}
 
   async runOnce(now: Date = new Date()): Promise<ExpirySweepResult> {
@@ -81,6 +91,9 @@ export class ExpirySweepService {
       financialSnapshotsCreated: 0,
       financialLedgersPosted: 0,
       abandonedUploadsRemoved: 0,
+      refundsStarted: 0,
+      refundsReconciled: 0,
+      chargesReconciled: 0,
       errors: [],
     };
 
@@ -144,6 +157,26 @@ export class ExpirySweepService {
         await this.attachments.purgeAbandonedUploads(now);
     } catch (error) {
       result.errors.push(`attachments: ${describe(error)}`);
+    }
+
+    if (this.refunds) {
+      try {
+        result.refundsStarted = (await this.refunds.initiateDue()).started;
+        result.refundsReconciled = (await this.refunds.reconcileUnresolved())
+          .checked;
+      } catch (error) {
+        result.errors.push(`refunds: ${describe(error)}`);
+      }
+    }
+
+    if (this.charges) {
+      try {
+        result.chargesReconciled = (
+          await this.charges.reconcileUnresolved()
+        ).checked;
+      } catch (error) {
+        result.errors.push(`saved-card charges: ${describe(error)}`);
+      }
     }
 
     return result;

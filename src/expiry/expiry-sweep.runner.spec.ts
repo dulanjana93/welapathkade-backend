@@ -11,6 +11,9 @@ const emptyResult: ExpirySweepResult = {
   financialSnapshotsCreated: 0,
   financialLedgersPosted: 0,
   abandonedUploadsRemoved: 0,
+  refundsStarted: 0,
+  refundsReconciled: 0,
+  chargesReconciled: 0,
   errors: [],
 };
 

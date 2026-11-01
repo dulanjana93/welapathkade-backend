@@ -11,6 +11,23 @@ const s3Env = {
   S3_SECRET_ACCESS_KEY: 'secret-key',
 };
 
+const notifyEnv = {
+  NOTIFY_LK_USER_ID: 'notify-user',
+  NOTIFY_LK_API_KEY: 'notify-key',
+  NOTIFY_LK_SENDER_ID: 'Welapathkade',
+};
+
+const payhereEnv = {
+  PAYHERE_MODE: 'live',
+  PAYHERE_MERCHANT_ID: 'merchant-1',
+  PAYHERE_MERCHANT_SECRET: 'merchant-secret',
+  PAYHERE_APP_ID: 'app-id',
+  PAYHERE_APP_SECRET: 'app-secret',
+  PAYHERE_NOTIFY_URL: 'https://api.example.com/payments/callbacks/payhere',
+  PAYHERE_RETURN_URL: 'https://app.example.com/payments/return',
+  PAYHERE_CANCEL_URL: 'https://app.example.com/payments/cancel',
+};
+
 const baseEnv = {
   NODE_ENV: 'development',
   PORT: '3010',
@@ -33,9 +50,15 @@ describe('validateEnv: NODE_ENV', () => {
     expect(validateEnv({ ...baseEnv, NODE_ENV: env }).NODE_ENV).toBe(env);
   });
 
-  it('accepts production when private S3 storage is configured', () => {
+  it('accepts production when private S3 storage and Notify.lk are configured', () => {
     expect(
-      validateEnv({ ...baseEnv, NODE_ENV: 'production', ...s3Env }).NODE_ENV,
+      validateEnv({
+        ...baseEnv,
+        NODE_ENV: 'production',
+        ...s3Env,
+        ...notifyEnv,
+        ...payhereEnv,
+      }).NODE_ENV,
     ).toBe('production');
   });
 
@@ -229,5 +252,228 @@ describe('validateEnv: object storage', () => {
         S3_ENDPOINT: 'https://key:secret@example.r2.cloudflarestorage.com',
       }),
     ).toThrow(/without embedded credentials/);
+  });
+});
+
+describe('validateEnv: Notify.lk', () => {
+  const production = {
+    ...baseEnv,
+    ...s3Env,
+    NODE_ENV: 'production',
+  };
+
+  it('allows all three Notify.lk settings to be unset outside production', () => {
+    expect(validateEnv({ ...baseEnv }).NOTIFY_LK_USER_ID).toBeUndefined();
+  });
+
+  it('trims a complete set and does not echo the values in errors', () => {
+    const env = validateEnv({
+      ...baseEnv,
+      NOTIFY_LK_USER_ID: '  notify-user  ',
+      NOTIFY_LK_API_KEY: '  notify-key  ',
+      NOTIFY_LK_SENDER_ID: '  Welapathkade  ',
+    });
+    expect(env.NOTIFY_LK_USER_ID).toBe('notify-user');
+    expect(env.NOTIFY_LK_API_KEY).toBe('notify-key');
+    expect(env.NOTIFY_LK_SENDER_ID).toBe('Welapathkade');
+  });
+
+  it('rejects a partial set without including the configured value', () => {
+    expect(() =>
+      validateEnv({ ...baseEnv, NOTIFY_LK_API_KEY: 'super-secret-key' }),
+    ).toThrow(/NOTIFY_LK_USER_ID, NOTIFY_LK_SENDER_ID must be set together/);
+    try {
+      validateEnv({ ...baseEnv, NOTIFY_LK_API_KEY: 'super-secret-key' });
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).not.toContain('super-secret-key');
+    }
+  });
+
+  it('requires all three settings in production', () => {
+    expect(() => validateEnv(production)).toThrow(
+      /NOTIFY_LK_USER_ID, NOTIFY_LK_API_KEY, NOTIFY_LK_SENDER_ID must be set in production/,
+    );
+  });
+
+  it.each(['NOTIFY_LK_USER_ID', 'NOTIFY_LK_API_KEY', 'NOTIFY_LK_SENDER_ID'])(
+    'fails production when %s is missing and does not print the other values',
+    (name) => {
+      let thrown: Error | undefined;
+      try {
+        validateEnv({ ...production, ...notifyEnv, [name]: undefined });
+      } catch (error) {
+        thrown = error as Error;
+      }
+      expect(thrown).toBeDefined();
+      expect(thrown?.message).toContain(`${name} must be set in production`);
+      expect(thrown?.message).not.toContain('notify-user');
+      expect(thrown?.message).not.toContain('notify-key');
+      expect(thrown?.message).not.toContain('Welapathkade');
+    },
+  );
+
+  it('rejects the NotifyDEMO sender for production OTP delivery', () => {
+    expect(() =>
+      validateEnv({
+        ...production,
+        ...notifyEnv,
+        NOTIFY_LK_SENDER_ID: 'NotifyDEMO',
+      }),
+    ).toThrow(/approved by Notify.lk/);
+  });
+});
+
+describe('validateEnv: PayHere', () => {
+  const sandbox = {
+    PAYHERE_MODE: 'sandbox',
+    PAYHERE_MERCHANT_ID: 'merchant-1',
+    PAYHERE_MERCHANT_SECRET: 'merchant-secret',
+    PAYHERE_APP_ID: 'app-id',
+    PAYHERE_APP_SECRET: 'app-secret',
+    PAYHERE_NOTIFY_URL: 'https://api.example.com/payments/callbacks/payhere',
+    PAYHERE_RETURN_URL: 'https://app.example.com/payments/return',
+    PAYHERE_CANCEL_URL: 'https://app.example.com/payments/cancel',
+  };
+
+  it('allows development to keep the mock gateway when PayHere is unset', () => {
+    expect(validateEnv({ ...baseEnv }).PAYHERE_MODE).toBeUndefined();
+  });
+
+  it('accepts a complete sandbox configuration', () => {
+    expect(validateEnv({ ...baseEnv, ...sandbox }).PAYHERE_MODE).toBe('sandbox');
+  });
+
+  it('rejects sandbox credentials in production without explicit authorization', () => {
+    expect(() =>
+      validateEnv({
+        ...baseEnv,
+        ...s3Env,
+        ...notifyEnv,
+        ...sandbox,
+        NODE_ENV: 'production',
+      }),
+    ).toThrow(/PAYHERE_ALLOW_SANDBOX=true/);
+  });
+
+  it('accepts production sandbox only when PAYHERE_ALLOW_SANDBOX=true', () => {
+    const validated = validateEnv({
+      ...baseEnv,
+      ...s3Env,
+      ...notifyEnv,
+      ...sandbox,
+      NODE_ENV: 'production',
+      PAYHERE_ALLOW_SANDBOX: ' TRUE ',
+      PAYHERE_CHECKOUT_URL: 'https://sandbox.payhere.lk/pay/checkout',
+      PAYHERE_OAUTH_URL: 'https://sandbox.payhere.lk/merchant/v1/oauth/token',
+    });
+    expect(validated.NODE_ENV).toBe('production');
+    expect(validated.PAYHERE_MODE).toBe('sandbox');
+    expect(validated.PAYHERE_ALLOW_SANDBOX).toBe('true');
+  });
+
+  it('rejects a live checkout or OAuth URL for authorized production sandbox', () => {
+    const hosted = {
+      ...baseEnv,
+      ...s3Env,
+      ...notifyEnv,
+      ...sandbox,
+      NODE_ENV: 'production',
+      PAYHERE_ALLOW_SANDBOX: 'true',
+    };
+    expect(() =>
+      validateEnv({
+        ...hosted,
+        PAYHERE_CHECKOUT_URL: 'https://www.payhere.lk/pay/checkout',
+      }),
+    ).toThrow(
+      /PAYHERE_CHECKOUT_URL must be https:\/\/sandbox\.payhere\.lk\/pay\/checkout/,
+    );
+    expect(() =>
+      validateEnv({
+        ...hosted,
+        PAYHERE_OAUTH_URL: 'https://www.payhere.lk/merchant/v1/oauth/token',
+      }),
+    ).toThrow(
+      /PAYHERE_OAUTH_URL must be https:\/\/sandbox\.payhere\.lk\/merchant\/v1\/oauth\/token/,
+    );
+  });
+
+  it('rejects a sandbox checkout or OAuth URL for production live mode', () => {
+    const hosted = {
+      ...baseEnv,
+      ...s3Env,
+      ...notifyEnv,
+      ...payhereEnv,
+      NODE_ENV: 'production',
+    };
+    expect(() =>
+      validateEnv({
+        ...hosted,
+        PAYHERE_CHECKOUT_URL: 'https://sandbox.payhere.lk/pay/checkout',
+      }),
+    ).toThrow(
+      /PAYHERE_CHECKOUT_URL must be https:\/\/www\.payhere\.lk\/pay\/checkout/,
+    );
+    expect(() =>
+      validateEnv({
+        ...hosted,
+        PAYHERE_OAUTH_URL: 'https://sandbox.payhere.lk/merchant/v1/oauth/token',
+      }),
+    ).toThrow(
+      /PAYHERE_OAUTH_URL must be https:\/\/www\.payhere\.lk\/merchant\/v1\/oauth\/token/,
+    );
+  });
+
+  it('rejects an invalid PayHere mode and a sandbox flag without sandbox mode', () => {
+    expect(() =>
+      validateEnv({
+        ...baseEnv,
+        ...s3Env,
+        ...notifyEnv,
+        ...payhereEnv,
+        NODE_ENV: 'production',
+        PAYHERE_MODE: 'test',
+      }),
+    ).toThrow(/Environment validation failed/);
+    expect(() =>
+      validateEnv({
+        ...baseEnv,
+        ...s3Env,
+        ...notifyEnv,
+        ...payhereEnv,
+        NODE_ENV: 'production',
+        PAYHERE_ALLOW_SANDBOX: 'true',
+      }),
+    ).toThrow(/PAYHERE_ALLOW_SANDBOX=true requires PAYHERE_MODE=sandbox/);
+  });
+
+  it('rejects a live checkout URL while the mode is sandbox', () => {
+    expect(() =>
+      validateEnv({
+        ...baseEnv,
+        ...sandbox,
+        PAYHERE_CHECKOUT_URL: 'https://www.payhere.lk/pay/checkout',
+      }),
+    ).toThrow(/PAYHERE_CHECKOUT_URL must be https:\/\/sandbox\.payhere\.lk\/pay\/checkout/);
+  });
+
+  it('does not echo the merchant secret', () => {
+    expect(() =>
+      validateEnv({
+        ...baseEnv,
+        PAYHERE_MODE: 'sandbox',
+        PAYHERE_MERCHANT_SECRET: 'super-secret-key',
+      }),
+    ).toThrow(/PAYHERE_MERCHANT_ID/);
+    try {
+      validateEnv({
+        ...baseEnv,
+        PAYHERE_MODE: 'sandbox',
+        PAYHERE_MERCHANT_SECRET: 'super-secret-key',
+      });
+    } catch (error) {
+      expect((error as Error).message).not.toContain('super-secret-key');
+    }
   });
 });

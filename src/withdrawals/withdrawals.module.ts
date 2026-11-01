@@ -12,6 +12,6 @@ import { WithdrawalsService } from './withdrawals.service';
     CustomerReferralPayoutsController,
   ],
   providers: [BankAccountCrypto, WithdrawalsService],
-  exports: [WithdrawalsService],
+  exports: [WithdrawalsService, BankAccountCrypto],
 })
 export class WithdrawalsModule {}

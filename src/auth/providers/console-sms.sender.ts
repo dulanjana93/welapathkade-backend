@@ -5,8 +5,8 @@ import {
 } from '../interfaces/sms-sender.interface';
 
 /**
- * Development/test SMS adapter (SMS gateway not wired yet).
- * Logs the OTP code to the Nest console so local/dev login works.
+ * Development and test SMS adapter. Production uses NotifySmsSender.
+ * Logs the OTP code to the Nest console so local login works.
  * Keeps the last code in memory for tests. Never returned from HTTP APIs.
  */
 @Injectable()
