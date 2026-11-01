@@ -65,6 +65,18 @@ describe('dev-only providers cannot boot outside development/test', () => {
     },
   );
 
+  it('keeps NotifySmsSender selected in production', () => {
+    const consoleSender = new ConsoleSmsSender();
+    const notify = new NotifySmsSender(
+      { userId: 'notify-user', apiKey: 'notify-key', senderId: 'NotifyDEMO' },
+      jest.fn(),
+    );
+    expect(selectSmsSender('production', consoleSender, notify)).toBe(notify);
+    expect(selectSmsSender('production', consoleSender, notify)).not.toBe(
+      consoleSender,
+    );
+  });
+
   it.each(['development', 'test'])(
     'both dev providers are allowed when NODE_ENV=%s',
     (env) => {

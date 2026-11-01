@@ -168,6 +168,19 @@ export class EnvironmentVariables {
   NOTIFY_LK_SENDER_ID?: string;
 
   /**
+   * Unset means false. `true` allows the sender ID NotifyDEMO only when
+   * production runtime is combined with explicitly authorized PayHere sandbox.
+   */
+  @Transform(({ value }: { value: unknown }) => {
+    if (typeof value !== 'string') return value;
+    const normalized = value.trim().toLowerCase();
+    return normalized === '' ? undefined : normalized;
+  })
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  NOTIFY_LK_ALLOW_DEMO_SENDER?: string;
+
+  /**
    * `local` (dev/test disk) or `s3` (private Cloudflare R2). Production must
    * use `s3`. Unset means local outside production.
    */

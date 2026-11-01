@@ -123,17 +123,30 @@ export function assertNotifyLkEnv(validated: {
   NOTIFY_LK_USER_ID?: string;
   NOTIFY_LK_API_KEY?: string;
   NOTIFY_LK_SENDER_ID?: string;
+  NOTIFY_LK_ALLOW_DEMO_SENDER?: string;
+  PAYHERE_MODE?: string;
+  PAYHERE_ALLOW_SANDBOX?: string;
 }): void {
   const missing = NOTIFY_LK_ENV_NAMES.filter(
     (name) => validated[name] === undefined,
   );
+  const allowDemo = validated.NOTIFY_LK_ALLOW_DEMO_SENDER === 'true';
+  const hostedSandbox =
+    validated.NODE_ENV === NodeEnv.Production &&
+    validated.PAYHERE_MODE === 'sandbox' &&
+    validated.PAYHERE_ALLOW_SANDBOX === 'true';
+  if (allowDemo && !hostedSandbox) {
+    throw new Error(
+      'Environment validation failed: NOTIFY_LK_ALLOW_DEMO_SENDER=true requires NODE_ENV=production, PAYHERE_MODE=sandbox, and PAYHERE_ALLOW_SANDBOX=true',
+    );
+  }
   if (validated.NODE_ENV === NodeEnv.Production) {
     if (missing.length > 0) {
       throw new Error(
         `Environment validation failed: ${missing.join(', ')} must be set in production`,
       );
     }
-    if (validated.NOTIFY_LK_SENDER_ID === 'NotifyDEMO') {
+    if (validated.NOTIFY_LK_SENDER_ID === 'NotifyDEMO' && !allowDemo) {
       throw new Error(
         'Environment validation failed: NOTIFY_LK_SENDER_ID must be a sender ID approved by Notify.lk. NotifyDEMO cannot be used for production OTP delivery.',
       );

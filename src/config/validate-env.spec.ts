@@ -322,6 +322,72 @@ describe('validateEnv: Notify.lk', () => {
       }),
     ).toThrow(/approved by Notify.lk/);
   });
+
+  it('accepts an approved production sender without the demo override', () => {
+    const env = validateEnv({
+      ...production,
+      ...notifyEnv,
+      ...payhereEnv,
+    });
+    expect(env.NOTIFY_LK_SENDER_ID).toBe('Welapathkade');
+    expect(env.NOTIFY_LK_ALLOW_DEMO_SENDER).toBeUndefined();
+  });
+
+  it('accepts NotifyDEMO only for authorized production sandbox', () => {
+    const env = validateEnv({
+      ...production,
+      ...notifyEnv,
+      PAYHERE_MODE: 'sandbox',
+      PAYHERE_ALLOW_SANDBOX: 'true',
+      PAYHERE_MERCHANT_ID: 'merchant-1',
+      PAYHERE_MERCHANT_SECRET: 'merchant-secret',
+      PAYHERE_APP_ID: 'app-id',
+      PAYHERE_APP_SECRET: 'app-secret',
+      PAYHERE_NOTIFY_URL: 'https://api.example.com/payments/callbacks/payhere',
+      PAYHERE_RETURN_URL: 'https://app.example.com/payments/return',
+      PAYHERE_CANCEL_URL: 'https://app.example.com/payments/cancel',
+      NOTIFY_LK_SENDER_ID: 'NotifyDEMO',
+      NOTIFY_LK_ALLOW_DEMO_SENDER: ' TRUE ',
+    });
+    expect(env.NODE_ENV).toBe('production');
+    expect(env.PAYHERE_MODE).toBe('sandbox');
+    expect(env.NOTIFY_LK_SENDER_ID).toBe('NotifyDEMO');
+    expect(env.NOTIFY_LK_ALLOW_DEMO_SENDER).toBe('true');
+  });
+
+  it('rejects NotifyDEMO when the override is combined with live PayHere', () => {
+    expect(() =>
+      validateEnv({
+        ...production,
+        ...notifyEnv,
+        ...payhereEnv,
+        NOTIFY_LK_SENDER_ID: 'NotifyDEMO',
+        NOTIFY_LK_ALLOW_DEMO_SENDER: 'true',
+      }),
+    ).toThrow(/NOTIFY_LK_ALLOW_DEMO_SENDER=true requires/);
+  });
+
+  it('rejects NotifyDEMO when sandbox authorization is missing', () => {
+    expect(() =>
+      validateEnv({
+        ...production,
+        ...notifyEnv,
+        PAYHERE_MODE: 'sandbox',
+        NOTIFY_LK_SENDER_ID: 'NotifyDEMO',
+        NOTIFY_LK_ALLOW_DEMO_SENDER: 'true',
+      }),
+    ).toThrow(/PAYHERE_ALLOW_SANDBOX=true/);
+  });
+
+  it('keeps development Notify.lk behavior unchanged', () => {
+    const env = validateEnv({
+      ...baseEnv,
+      ...notifyEnv,
+      NOTIFY_LK_SENDER_ID: 'NotifyDEMO',
+    });
+    expect(env.NOTIFY_LK_SENDER_ID).toBe('NotifyDEMO');
+    expect(env.NOTIFY_LK_ALLOW_DEMO_SENDER).toBeUndefined();
+  });
 });
 
 describe('validateEnv: PayHere', () => {
