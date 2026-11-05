@@ -40,6 +40,7 @@ import {
   billingProfileIncompleteException,
 } from '../users/billing-profile';
 import { CHECKOUT_BLOCKED_STATUSES } from './appointment.state';
+import { attemptRequiresReconciliation } from './attempt-reconciliation';
 import { PaymentsService } from './payments.service';
 import { PAYHERE_MERCHANT } from './payhere-refund.service';
 import {
@@ -74,6 +75,7 @@ type Claimed = {
   merchantReference: string;
   appointmentId: string;
   amount: string;
+  savedCardId: string;
 };
 
 type ClaimResult = Claimed | { kind: 'existing'; view: SavedCardChargeView };
@@ -100,6 +102,7 @@ export class SavedCardChargeService {
     user: User,
     consultationId: string,
     proposalId: string,
+    savedCardId: string,
   ): Promise<SavedCardChargeView> {
     if (user.role !== UserRole.PUBLIC) {
       throw new ForbiddenException('PUBLIC role required');
@@ -134,7 +137,6 @@ export class SavedCardChargeService {
       throw billingProfileIncompleteException(billing.missingFields);
     }
     const amount = toMoneyString(consultation.requestedPrice);
-    await this.assertChargeableCard(user.id);
     if (!this.payhere.hasMerchantCapacity(2)) {
       throw new HttpException(
         'PayHere is temporarily unavailable. Try again shortly.',
@@ -142,17 +144,25 @@ export class SavedCardChargeService {
       );
     }
 
-    const claimed = await this.claim(user, consultation, proposal, amount);
+    const claimed = await this.claim(
+      user,
+      consultation,
+      proposal,
+      amount,
+      savedCardId,
+    );
     if (claimed.kind === 'existing') return claimed.view;
 
-    const cardId = await this.cardIdOrRelease(user.id, claimed.attemptId);
+    const cardId = claimed.savedCardId;
     let token: string;
     try {
+      await this.assertChargeableCard(user.id, cardId);
       token = await this.savedCards.readActiveToken(user.id, cardId);
-    } catch {
+    } catch (error) {
       await this.releaseUnsent(claimed.attemptId);
+      if (error instanceof HttpException) throw error;
       throw new ConflictException(
-        'No saved card is authorized for automatic payment',
+        'Saved card is not authorized for automatic payment',
       );
     }
     let result: PayHereChargeCall;
@@ -301,6 +311,7 @@ export class SavedCardChargeService {
       durationMinutes: number;
     },
     amount: string,
+    savedCardId: string,
   ): Promise<ClaimResult> {
     const now = new Date();
     return this.bookingGuard.withAstrologerLock(
@@ -362,6 +373,8 @@ export class SavedCardChargeService {
             'A manual checkout is already open for this appointment',
           );
         }
+
+        await this.assertChargeableCard(user.id, savedCardId, tx);
 
         let appointment: AppointmentLoaded;
         if (
@@ -457,6 +470,7 @@ export class SavedCardChargeService {
               checkoutPayload: Prisma.JsonNull,
               openChargeSlot: payment.id,
               requiresReview: false,
+              savedPaymentMethodId: savedCardId,
             },
           });
           return {
@@ -465,6 +479,7 @@ export class SavedCardChargeService {
             merchantReference,
             appointmentId: appointment.id,
             amount,
+            savedCardId,
           };
         } catch (error) {
           if (!isUniqueConflict(error)) throw error;
@@ -595,33 +610,36 @@ export class SavedCardChargeService {
     });
   }
 
-  private async assertChargeableCard(userId: string): Promise<string> {
-    const cardId = await this.readAuthorizedCardId(this.prisma, userId);
-    if (!cardId) {
+  private async assertChargeableCard(
+    userId: string,
+    cardId: string,
+    db: Prisma.TransactionClient | PrismaService = this.prisma,
+  ): Promise<void> {
+    const card = await db.savedPaymentMethod.findUnique({
+      where: { id: cardId },
+    });
+    if (!card || card.userId !== userId) {
+      throw new NotFoundException('Saved card not found');
+    }
+    const authorized = await this.readAuthorizedCardId(db, userId, cardId);
+    if (!authorized) {
       throw new ConflictException(
-        'No saved card is authorized for automatic payment',
+        'Saved card is not authorized for automatic payment',
       );
     }
-    return cardId;
   }
 
   private async readAuthorizedCardId(
     db: Prisma.TransactionClient | PrismaService,
     userId: string,
-    cardId?: string,
+    cardId: string,
   ): Promise<string | null> {
-    const card = await db.savedPaymentMethod.findFirst({
-      where: {
-        userId,
-        ...(cardId ? { id: cardId } : {}),
-        status: SavedCardStatus.ACTIVE,
-        authorizationEnabled: true,
-        revokedAt: null,
-        removedAt: null,
-      },
+    const card = await db.savedPaymentMethod.findUnique({
+      where: { id: cardId },
     });
     if (
       !card ||
+      card.userId !== userId ||
       !savedCardIsChargeable(card) ||
       card.consentVersion !== AUTOMATIC_PAYMENT_CONSENT_VERSION
     ) {
@@ -646,15 +664,6 @@ export class SavedCardChargeService {
     return card.id;
   }
 
-  private async cardIdOrRelease(userId: string, attemptId: string) {
-    try {
-      return await this.assertChargeableCard(userId);
-    } catch (error) {
-      await this.releaseUnsent(attemptId);
-      throw error;
-    }
-  }
-
   private async viewFor(
     appointmentId: string,
     attemptId: string,
@@ -675,15 +684,12 @@ function toChargeView(
   appointment: AppointmentLoaded,
   attempt: PaymentAttempt | undefined,
 ): SavedCardChargeView {
-  const open =
-    Boolean(attempt?.openChargeSlot) &&
-    attempt?.status !== PaymentStatus.PAID;
   return {
     provider: 'PAYHERE',
     attemptStatus: attempt?.status ?? PaymentStatus.PENDING,
     merchantReference: attempt?.merchantReference ?? '',
     appointmentStatus: appointment.status,
-    reconciliationRequired: attempt?.requiresReview === true || open,
+    reconciliationRequired: attemptRequiresReconciliation(attempt),
     refundObligation: appointment.refundObligation,
   };
 }

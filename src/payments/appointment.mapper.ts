@@ -8,6 +8,7 @@ import {
 import { BUSINESS_TIMEZONE } from '../availability/availability.constants';
 import { toMoneyString, type MoneyString } from '../common/money/money';
 import { DateTime } from 'luxon';
+import { attemptRequiresReconciliation } from './attempt-reconciliation';
 
 export type PaymentAttemptView = {
   id: string;
@@ -15,7 +16,11 @@ export type PaymentAttemptView = {
   status: PaymentStatus;
   provider: string;
   createdAt: string;
-  /** True when a saved-card charge was sent and its outcome is still unknown. */
+  /**
+   * True when the latest attempt is under review or still holds the open
+   * charge slot. False for a paid attempt and for an unsent failure whose
+   * slot was released.
+   */
   reconciliationRequired: boolean;
 };
 
@@ -123,7 +128,7 @@ export function toAppointmentView(
                 status: latest.status,
                 provider: latest.provider,
                 createdAt: latest.createdAt.toISOString(),
-                reconciliationRequired: latest.requiresReview === true,
+                reconciliationRequired: attemptRequiresReconciliation(latest),
               }
             : null,
         }

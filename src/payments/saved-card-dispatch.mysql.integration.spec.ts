@@ -398,6 +398,9 @@ async function cleanup(db: DbClient) {
   const userIds = [...createdUserIds];
   const serviceIds = [...createdServiceIds];
   if (cardIds.length > 0) {
+    await db.paymentAttempt.deleteMany({
+      where: { savedPaymentMethodId: { in: cardIds } },
+    });
     await db.savedCardConsentEvent.deleteMany({
       where: { savedPaymentMethodId: { in: cardIds } },
     });
@@ -695,7 +698,7 @@ describe('saved-card dispatch MySQL concurrency', () => {
     );
     const cards = new SavedCardService(other as never, null, crypto);
     const charges = chargeService(other, cards, gateway);
-    const chargePromise = charges.charge(fixture.customer, fixture.consultationId, fixture.proposalId);
+    const chargePromise = charges.charge(fixture.customer, fixture.consultationId, fixture.proposalId, fixture.cardId);
     await withTimeout(oauthEntered, 4_000, 'oauth barrier');
     expect(chargePosts).toBe(0);
     await cards.revoke(fixture.customer.id, fixture.cardId);
@@ -713,6 +716,7 @@ describe('saved-card dispatch MySQL concurrency', () => {
     expect(attempt.status).toBe(PaymentStatus.FAILED);
     expect(attempt.openChargeSlot).toBeNull();
     expect(attempt.checkoutPayload).toBeNull();
+    expect(attempt.savedPaymentMethodId).toBe(fixture.cardId);
     expect(card.tokenCiphertext).toBeNull();
   });
 
@@ -744,16 +748,26 @@ describe('saved-card dispatch MySQL concurrency', () => {
       fixture.customer,
       fixture.consultationId,
       fixture.proposalId,
+      fixture.cardId,
     );
     expect(chargeCalls).toBe(1);
     expect(first.reconciliationRequired).toBe(true);
+    const stored = await probe.paymentAttempt.findFirstOrThrow({
+      where: { merchantReference: first.merchantReference },
+    });
+    expect(stored.savedPaymentMethodId).toBe(fixture.cardId);
     const second = await charges.charge(
       fixture.customer,
       fixture.consultationId,
       fixture.proposalId,
+      'card-not-selected',
     );
     expect(chargeCalls).toBe(1);
     expect(second.merchantReference).toBe(first.merchantReference);
+    const unchanged = await probe.paymentAttempt.findUniqueOrThrow({
+      where: { id: stored.id },
+    });
+    expect(unchanged.savedPaymentMethodId).toBe(fixture.cardId);
     const attempts = await probe.paymentAttempt.count({
       where: { payment: { appointmentId: fixture.appointmentId } },
     });
@@ -776,6 +790,7 @@ describe('saved-card dispatch MySQL concurrency', () => {
       fixture.customer,
       fixture.consultationId,
       fixture.proposalId,
+      fixture.cardId,
     );
     expect(chargeCalls).toBe(1);
     expect(restarted.reconciliationRequired).toBe(true);

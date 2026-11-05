@@ -3,6 +3,8 @@ import { AuthModule } from '../auth/auth.module';
 import { UsersModule } from '../users/users.module';
 import { AdminAuthController } from './admin-auth.controller';
 import { AdminAuthService } from './admin-auth.service';
+import { AdminConsultationsController } from './admin-consultations.controller';
+import { AdminConsultationsService } from './admin-consultations.service';
 import { AdminFinanceController } from './admin-finance.controller';
 import { AdminFinanceService } from './admin-finance.service';
 import { AdminServicesController } from './admin-services.controller';
@@ -29,10 +31,15 @@ import { AdminSavedCardChargesController } from './admin-saved-card-charges.cont
     AdminUsersController,
     AdminServicesController,
     AdminAstrologersController,
+    AdminConsultationsController,
     AdminFinanceController,
     AdminRefundsController,
     AdminSavedCardChargesController,
   ],
-  providers: [AdminAuthService, AdminFinanceService],
+  providers: [
+    AdminAuthService,
+    AdminFinanceService,
+    AdminConsultationsService,
+  ],
 })
 export class AdminModule {}

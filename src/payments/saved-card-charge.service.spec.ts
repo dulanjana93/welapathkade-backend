@@ -2,6 +2,7 @@ import {
   ConflictException,
   ForbiddenException,
   HttpException,
+  NotFoundException,
 } from '@nestjs/common';
 import {
   AppointmentStatus,
@@ -10,6 +11,7 @@ import {
   RefundObligation,
   UserRole,
 } from '@prisma/client';
+import { attemptRequiresReconciliation } from './attempt-reconciliation';
 import { PayHereChargeNotSentError } from './payhere/payhere.gateway';
 import { SavedCardChargeService } from './saved-card-charge.service';
 
@@ -55,6 +57,8 @@ describe('SavedCardChargeService', () => {
     consentVersion: '2026-11-01',
   };
 
+  const savedPaymentMethod = { findUnique: jest.fn() };
+  const savedCardConsentEvent = { findFirst: jest.fn() };
   const tx = {
     appointment: {
       findUnique: jest.fn(),
@@ -63,12 +67,14 @@ describe('SavedCardChargeService', () => {
     },
     payment: { create: jest.fn(), update: jest.fn() },
     paymentAttempt: { create: jest.fn(), update: jest.fn(), findFirst: jest.fn() },
+    savedPaymentMethod,
+    savedCardConsentEvent,
   };
   const prisma = {
     consultation: { findUnique: jest.fn() },
     consultationProposal: { findFirst: jest.fn() },
-    savedPaymentMethod: { findFirst: jest.fn() },
-    savedCardConsentEvent: { findFirst: jest.fn() },
+    savedPaymentMethod,
+    savedCardConsentEvent,
     paymentAttempt: {
       updateMany: jest.fn(),
       findUnique: jest.fn(),
@@ -137,7 +143,7 @@ describe('SavedCardChargeService', () => {
     jest.clearAllMocks();
     prisma.consultation.findUnique.mockResolvedValue(consultation);
     prisma.consultationProposal.findFirst.mockResolvedValue(proposal);
-    prisma.savedPaymentMethod.findFirst.mockResolvedValue(card);
+    prisma.savedPaymentMethod.findUnique.mockResolvedValue(card);
     prisma.savedCardConsentEvent.findFirst.mockImplementation(
       async ({ where }: { where: { type: string } }) =>
         where.type === 'CONSENT_REVOKED' ? null : { id: 'grant' },
@@ -215,7 +221,7 @@ describe('SavedCardChargeService', () => {
 
   it('charges an active authorized card once and hides the token', async () => {
     const log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
-    const view = await service.charge(user as never, 'c-1', 'p-1');
+    const view = await service.charge(user as never, 'c-1', 'p-1', 'card-1');
     expect(payhere.chargePayment.mock.calls[0][0]).toEqual(
       expect.objectContaining({
         amount: '1500.00',
@@ -230,6 +236,15 @@ describe('SavedCardChargeService', () => {
     expect(stored).not.toContain('merchant-secret');
     expect(stored).not.toContain('oauth-access-secret');
     expect(JSON.stringify(view)).not.toContain(TOKEN);
+    expect(tx.paymentAttempt.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ savedPaymentMethodId: 'card-1' }),
+      }),
+    );
+    expect(savedCards.readActiveToken).toHaveBeenCalledWith('cust-1', 'card-1');
+    const cardLookup = tx.savedPaymentMethod.findUnique.mock.invocationCallOrder[0];
+    const attemptInsert = tx.paymentAttempt.create.mock.invocationCallOrder[0];
+    expect(cardLookup).toBeLessThan(attemptInsert);
     expect(view).toMatchObject({
       provider: 'PAYHERE',
       attemptStatus: PaymentStatus.PAID,
@@ -254,35 +269,53 @@ describe('SavedCardChargeService', () => {
       'disabled card',
       { ...card, status: 'DISABLED', authorizationEnabled: false },
     ],
+    [
+      'pending card',
+      { ...card, status: 'PENDING', authorizationEnabled: false, tokenCiphertext: null },
+    ],
     ['removed card', { ...card, status: 'REMOVED', removedAt: new Date() }],
     ['revoked card', { ...card, revokedAt: new Date(), authorizationEnabled: false }],
     ['missing token', { ...card, tokenCiphertext: null }],
     ['old consent', { ...card, consentVersion: '2020-01-01' }],
   ])('rejects a %s before reserving', async (_label, row) => {
-    prisma.savedPaymentMethod.findFirst.mockResolvedValue(row);
-    await expect(service.charge(user as never, 'c-1', 'p-1')).rejects.toBeInstanceOf(
-      ConflictException,
+    prisma.savedPaymentMethod.findUnique.mockResolvedValue(row);
+    await expect(service.charge(user as never, 'c-1', 'p-1', 'card-1')).rejects.toBeInstanceOf(
+      row ? ConflictException : NotFoundException,
     );
-    expect(bookingGuard.withAstrologerLock).not.toHaveBeenCalled();
+    expect(tx.appointment.create).not.toHaveBeenCalled();
+    expect(tx.paymentAttempt.create).not.toHaveBeenCalled();
     expect(payhere.chargePayment).not.toHaveBeenCalled();
   });
 
   it('rejects revoked consent and another customer’s card', async () => {
     prisma.savedCardConsentEvent.findFirst.mockResolvedValue({ id: 'revoked' });
-    await expect(service.charge(user as never, 'c-1', 'p-1')).rejects.toBeInstanceOf(
+    await expect(service.charge(user as never, 'c-1', 'p-1', 'card-1')).rejects.toBeInstanceOf(
       ConflictException,
     );
-    expect(prisma.savedPaymentMethod.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ userId: 'cust-1' }) }),
+    expect(prisma.savedPaymentMethod.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'card-1' } }),
     );
+    prisma.savedCardConsentEvent.findFirst.mockImplementation(
+      async ({ where }: { where: { type: string } }) =>
+        where.type === 'CONSENT_REVOKED' ? null : { id: 'grant' },
+    );
+    prisma.savedPaymentMethod.findUnique.mockResolvedValue({
+      ...card,
+      id: 'card-foreign',
+      userId: 'someone-else',
+    });
+    await expect(
+      service.charge(user as never, 'c-1', 'p-1', 'card-foreign'),
+    ).rejects.toBeInstanceOf(NotFoundException);
     expect(payhere.chargePayment).not.toHaveBeenCalled();
+    expect(tx.paymentAttempt.create).not.toHaveBeenCalled();
   });
 
   it('releases the attempt when the token cannot be decrypted', async () => {
     savedCards.readActiveToken.mockRejectedValue(
       new Error(`decrypt failed ${TOKEN}`),
     );
-    await expect(service.charge(user as never, 'c-1', 'p-1')).rejects.toThrow(
+    await expect(service.charge(user as never, 'c-1', 'p-1', 'card-1')).rejects.toThrow(
       /authorized for automatic payment/,
     );
     expect(payhere.chargePayment).not.toHaveBeenCalled();
@@ -320,7 +353,7 @@ describe('SavedCardChargeService', () => {
         ],
       }),
     );
-    const pending = await service.charge(user as never, 'c-1', 'p-1');
+    const pending = await service.charge(user as never, 'c-1', 'p-1', 'card-1');
     expect(pending.reconciliationRequired).toBe(true);
     expect(pending.appointmentStatus).not.toBe(AppointmentStatus.CONFIRMED);
     expect(payments.finalizeVerified).not.toHaveBeenCalled();
@@ -344,7 +377,7 @@ describe('SavedCardChargeService', () => {
         ],
       }),
     );
-    const declined = await service.charge(user as never, 'c-1', 'p-1');
+    const declined = await service.charge(user as never, 'c-1', 'p-1', 'card-1');
     expect(declined.attemptStatus).toBe(PaymentStatus.PENDING);
     expect(declined.reconciliationRequired).toBe(true);
     expect(payments.finalizeVerified).not.toHaveBeenCalled();
@@ -369,10 +402,45 @@ describe('SavedCardChargeService', () => {
         ],
       }),
     );
-    const view = await service.charge(user as never, 'c-1', 'p-1');
+    const view = await service.charge(user as never, 'c-1', 'p-1', 'card-1');
     expect(view.reconciliationRequired).toBe(true);
+    expect(view.reconciliationRequired).toBe(
+      attemptRequiresReconciliation({
+        status: PaymentStatus.PENDING,
+        requiresReview: true,
+        openChargeSlot: 'pay-1',
+      }),
+    );
+    expect(view.merchantReference).toBe('sc_existing');
     expect(tx.paymentAttempt.create).not.toHaveBeenCalled();
+    expect(tx.paymentAttempt.update).not.toHaveBeenCalled();
     expect(payhere.chargePayment).not.toHaveBeenCalled();
+  });
+
+  it('does not report reconciliation for a verified paid attempt', async () => {
+    const attempt = {
+      id: 'att-1',
+      merchantReference: 'sc_paid',
+      status: PaymentStatus.PAID,
+      requiresReview: true,
+      openChargeSlot: 'pay-1',
+      createdAt: new Date(),
+    };
+    tx.appointment.findUnique.mockResolvedValue(
+      readyAppointment({
+        status: AppointmentStatus.CONFIRMED,
+        payments: [{ attempts: [attempt] }],
+      }),
+    );
+    const view = await service.charge(user as never, 'c-1', 'p-1', 'card-1');
+    expect(view.attemptStatus).toBe(PaymentStatus.PAID);
+    expect(view.reconciliationRequired).toBe(false);
+    expect(view.reconciliationRequired).toBe(
+      attemptRequiresReconciliation(attempt),
+    );
+    expect(payhere.chargePayment).not.toHaveBeenCalled();
+    expect(JSON.stringify(view)).not.toContain('openChargeSlot');
+    expect(JSON.stringify(view)).not.toContain('pay-1');
   });
 
   it('does not charge again after a timeout or a restart', async () => {
@@ -394,8 +462,15 @@ describe('SavedCardChargeService', () => {
         ],
       }),
     );
-    const view = await service.charge(user as never, 'c-1', 'p-1');
+    const view = await service.charge(user as never, 'c-1', 'p-1', 'card-1');
     expect(view.reconciliationRequired).toBe(true);
+    expect(view.reconciliationRequired).toBe(
+      attemptRequiresReconciliation({
+        status: PaymentStatus.PENDING,
+        requiresReview: false,
+        openChargeSlot: 'pay-1',
+      }),
+    );
     expect(tx.paymentAttempt.update).toHaveBeenCalledWith(
       expect.objectContaining({ data: { requiresReview: true } }),
     );
@@ -417,7 +492,7 @@ describe('SavedCardChargeService', () => {
       openChargeSlot: 'pay-1',
       createdAt: new Date(),
     });
-    const view = await service.charge(user as never, 'c-1', 'p-1');
+    const view = await service.charge(user as never, 'c-1', 'p-1', 'card-1');
     expect(view.merchantReference).toBe('sc_winner');
     expect(payhere.chargePayment).not.toHaveBeenCalled();
   });
@@ -509,7 +584,7 @@ describe('SavedCardChargeService', () => {
         ],
       }),
     );
-    const view = await service.charge(user as never, 'c-1', 'p-1');
+    const view = await service.charge(user as never, 'c-1', 'p-1', 'card-1');
     expect(payments.finalizeVerified).toHaveBeenCalledTimes(1);
     expect(view.appointmentStatus).toBe(AppointmentStatus.PAYMENT_EXPIRED);
     expect(view.refundObligation).toBe(RefundObligation.FULL_REFUND_DUE);
@@ -525,7 +600,7 @@ describe('SavedCardChargeService', () => {
       ) => {
         const allowed = await hooks?.beforeDispatch?.();
         expect(allowed).toBe(true);
-        prisma.savedPaymentMethod.findFirst.mockResolvedValue({
+        prisma.savedPaymentMethod.findUnique.mockResolvedValue({
           ...card,
           status: 'DISABLED',
           authorizationEnabled: false,
@@ -554,7 +629,7 @@ describe('SavedCardChargeService', () => {
         ],
       }),
     );
-    const view = await service.charge(user as never, 'c-1', 'p-1');
+    const view = await service.charge(user as never, 'c-1', 'p-1', 'card-1');
     expect(view.attemptStatus).toBe(PaymentStatus.PENDING);
     expect(view.reconciliationRequired).toBe(true);
     expect(prisma.paymentAttempt.updateMany).toHaveBeenCalledWith(
@@ -573,6 +648,7 @@ describe('SavedCardChargeService', () => {
         { ...user, role: UserRole.ASTROLOGER } as never,
         'c-1',
         'p-1',
+        'card-1',
       ),
     ).rejects.toBeInstanceOf(ForbiddenException);
     const unavailable = new SavedCardChargeService(
@@ -584,7 +660,7 @@ describe('SavedCardChargeService', () => {
       payments as never,
       null,
     );
-    await expect(unavailable.charge(user as never, 'c-1', 'p-1')).rejects.toThrow(
+    await expect(unavailable.charge(user as never, 'c-1', 'p-1', 'card-1')).rejects.toThrow(
       /PAYHERE_MODE/,
     );
     expect(payhere.chargePayment).not.toHaveBeenCalled();
@@ -595,7 +671,7 @@ describe('SavedCardChargeService', () => {
       ...proposal,
       status: 'PENDING',
     });
-    await expect(service.charge(user as never, 'c-1', 'p-1')).rejects.toThrow(
+    await expect(service.charge(user as never, 'c-1', 'p-1', 'card-1')).rejects.toThrow(
       /proposal/,
     );
     expect(bookingGuard.withAstrologerLock).not.toHaveBeenCalled();
@@ -604,7 +680,7 @@ describe('SavedCardChargeService', () => {
 
   it('stops before the lock when PayHere has no capacity', async () => {
     payhere.hasMerchantCapacity.mockReturnValue(false);
-    await expect(service.charge(user as never, 'c-1', 'p-1')).rejects.toBeInstanceOf(
+    await expect(service.charge(user as never, 'c-1', 'p-1', 'card-1')).rejects.toBeInstanceOf(
       HttpException,
     );
     expect(bookingGuard.withAstrologerLock).not.toHaveBeenCalled();
@@ -639,7 +715,7 @@ describe('SavedCardChargeService', () => {
           ],
         }),
       );
-      const view = await service.charge(user as never, 'c-1', 'p-1');
+      const view = await service.charge(user as never, 'c-1', 'p-1', 'card-1');
       expect(view.reconciliationRequired).toBe(true);
       expect(view.attemptStatus).not.toBe(PaymentStatus.PAID);
       expect(payments.finalizeVerified).not.toHaveBeenCalled();
@@ -656,7 +732,7 @@ describe('SavedCardChargeService', () => {
   );
 
   it('finalizes only one retrieval match and does not charge again to check it', async () => {
-    await service.charge(user as never, 'c-1', 'p-1');
+    await service.charge(user as never, 'c-1', 'p-1', 'card-1');
     expect(payments.finalizeVerified).toHaveBeenCalledTimes(1);
     expect(payments.finalizeVerified).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -691,7 +767,7 @@ describe('SavedCardChargeService', () => {
         ],
       }),
     );
-    const view = await service.charge(user as never, 'c-1', 'p-1');
+    const view = await service.charge(user as never, 'c-1', 'p-1', 'card-1');
     expect(view.reconciliationRequired).toBe(true);
     expect(payments.finalizeVerified).not.toHaveBeenCalled();
     expect(payhere.chargePayment).toHaveBeenCalledTimes(1);
@@ -699,7 +775,7 @@ describe('SavedCardChargeService', () => {
 
   it('can confirm a bad synchronous signature only through one retrieval match', async () => {
     payhere.chargePayment.mockResolvedValue({ kind: 'uncertain' });
-    await service.charge(user as never, 'c-1', 'p-1');
+    await service.charge(user as never, 'c-1', 'p-1', 'card-1');
     expect(payments.finalizeVerified).toHaveBeenCalledTimes(1);
     expect(payhere.chargePayment).toHaveBeenCalledTimes(1);
     expect(payhere.verifyByReference).toHaveBeenCalledWith(
@@ -719,7 +795,7 @@ describe('SavedCardChargeService', () => {
         _input: unknown,
         hooks?: { beforeDispatch?: () => Promise<boolean> },
       ) => {
-        prisma.savedPaymentMethod.findFirst.mockResolvedValue({
+        prisma.savedPaymentMethod.findUnique.mockResolvedValue({
           ...card,
           status: 'DISABLED',
           authorizationEnabled: false,
@@ -733,7 +809,7 @@ describe('SavedCardChargeService', () => {
         return { kind: 'uncertain' };
       },
     );
-    await expect(service.charge(user as never, 'c-1', 'p-1')).rejects.toBeInstanceOf(
+    await expect(service.charge(user as never, 'c-1', 'p-1', 'card-1')).rejects.toBeInstanceOf(
       HttpException,
     );
     expect(posted).toBe(false);
@@ -759,7 +835,7 @@ describe('SavedCardChargeService', () => {
       ) => {
         const allowed = await hooks?.beforeDispatch?.();
         expect(allowed).toBe(true);
-        prisma.savedPaymentMethod.findFirst.mockResolvedValue({
+        prisma.savedPaymentMethod.findUnique.mockResolvedValue({
           ...card,
           status: 'DISABLED',
           authorizationEnabled: false,
@@ -788,7 +864,7 @@ describe('SavedCardChargeService', () => {
         ],
       }),
     );
-    const view = await service.charge(user as never, 'c-1', 'p-1');
+    const view = await service.charge(user as never, 'c-1', 'p-1', 'card-1');
     expect(posted).toBe(true);
     expect(view.attemptStatus).toBe(PaymentStatus.PENDING);
     expect(view.reconciliationRequired).toBe(true);
@@ -832,7 +908,7 @@ describe('SavedCardChargeService', () => {
       },
     );
     const revokeFirst = prisma.$transaction(async () => {
-      prisma.savedPaymentMethod.findFirst.mockResolvedValue({
+      prisma.savedPaymentMethod.findUnique.mockResolvedValue({
         ...card,
         status: 'DISABLED',
         authorizationEnabled: false,
@@ -857,7 +933,7 @@ describe('SavedCardChargeService', () => {
         return { kind: 'uncertain' };
       },
     );
-    const chargePromise = service.charge(user as never, 'c-1', 'p-1');
+    const chargePromise = service.charge(user as never, 'c-1', 'p-1', 'card-1');
     await chargeEntered;
     releaseHold();
     await revokeFirst;
@@ -886,7 +962,7 @@ describe('SavedCardChargeService', () => {
         ],
       }),
     );
-    const timedOut = await service.charge(user as never, 'c-1', 'p-1');
+    const timedOut = await service.charge(user as never, 'c-1', 'p-1', 'card-1');
     expect(timedOut.reconciliationRequired).toBe(true);
     expect(payments.finalizeVerified).not.toHaveBeenCalled();
     expect(payhere.chargePayment).toHaveBeenCalledTimes(1);
@@ -906,5 +982,96 @@ describe('SavedCardChargeService', () => {
     payhere.verifyByReference.mockResolvedValue({ success: false, pending: true });
     await service.reconcileOne('att-1');
     expect(payhere.chargePayment).toHaveBeenCalledTimes(1);
+  });
+
+  it('charges the selected card rather than another active card', async () => {
+    const second = {
+      ...card,
+      id: 'card-2',
+      tokenCiphertext: 'cipher-2',
+    };
+    prisma.savedPaymentMethod.findUnique.mockImplementation(
+      async ({ where }: { where: { id: string } }) =>
+        where.id === 'card-2' ? second : null,
+    );
+    savedCards.readActiveToken.mockResolvedValue('SECOND-TOKEN');
+    await service.charge(user as never, 'c-1', 'p-1', 'card-2');
+    expect(savedCards.readActiveToken).toHaveBeenCalledWith('cust-1', 'card-2');
+    expect(payhere.chargePayment.mock.calls[0][0].customerToken).toBe(
+      'SECOND-TOKEN',
+    );
+    expect(tx.paymentAttempt.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ savedPaymentMethodId: 'card-2' }),
+      }),
+    );
+    expect(JSON.stringify(tx.paymentAttempt.create.mock.calls)).not.toContain(
+      'cipher-2',
+    );
+  });
+
+  it('keeps an existing attempt and its card when a later request selects another card', async () => {
+    tx.appointment.findUnique.mockResolvedValue(
+      readyAppointment({
+        payments: [
+          {
+            attempts: [
+              {
+                id: 'att-1',
+                merchantReference: 'sc_existing',
+                status: PaymentStatus.PENDING,
+                requiresReview: true,
+                openChargeSlot: 'pay-1',
+                savedPaymentMethodId: 'card-1',
+                createdAt: new Date(),
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const view = await service.charge(user as never, 'c-1', 'p-1', 'card-2');
+    expect(view.merchantReference).toBe('sc_existing');
+    expect(view.reconciliationRequired).toBe(true);
+    expect(tx.paymentAttempt.create).not.toHaveBeenCalled();
+    expect(tx.paymentAttempt.update).not.toHaveBeenCalled();
+    expect(payhere.chargePayment).not.toHaveBeenCalled();
+  });
+
+  it('does not dispatch twice when concurrent requests select different cards', async () => {
+    let winner: string | undefined;
+    tx.paymentAttempt.create.mockImplementation(
+      async ({ data }: { data: { savedPaymentMethodId?: string } }) => {
+        if (winner) {
+          throw new Prisma.PrismaClientKnownRequestError('Unique', {
+            code: 'P2002',
+            clientVersion: 'test',
+          });
+        }
+        winner = data.savedPaymentMethodId;
+        return { id: 'att-1', merchantReference: 'sc_winner', ...data };
+      },
+    );
+    tx.paymentAttempt.findFirst.mockImplementation(async () => ({
+      id: 'att-1',
+      merchantReference: 'sc_winner',
+      status: PaymentStatus.PENDING,
+      requiresReview: false,
+      openChargeSlot: 'pay-1',
+      savedPaymentMethodId: winner,
+      createdAt: new Date(),
+    }));
+    const [first, second] = await Promise.all([
+      service.charge(user as never, 'c-1', 'p-1', 'card-1'),
+      service.charge(user as never, 'c-1', 'p-1', 'card-2'),
+    ]);
+    expect(payhere.chargePayment).toHaveBeenCalledTimes(1);
+    expect(savedCards.readActiveToken).toHaveBeenCalledTimes(1);
+    expect(savedCards.readActiveToken).toHaveBeenCalledWith('cust-1', winner);
+    expect([first.merchantReference, second.merchantReference].sort()).toEqual([
+      'sc_done',
+      'sc_winner',
+    ]);
+    expect(tx.paymentAttempt.update).not.toHaveBeenCalled();
   });
 });

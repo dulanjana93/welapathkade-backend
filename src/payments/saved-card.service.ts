@@ -45,6 +45,13 @@ export type SavedCardView = {
   removedAt: Date | null;
 };
 
+/** Customer-visible in-flight registration. No card or token fields. */
+export type PendingRegistrationView = {
+  id: string;
+  status: typeof SavedCardStatus.PENDING;
+  consentedAt: Date;
+};
+
 const RETIRED = {
   authorizationEnabled: false,
   tokenCiphertext: null,
@@ -74,11 +81,27 @@ export class SavedCardService {
   }
 
   async list(userId: string) {
-    const rows = await this.prisma.savedPaymentMethod.findMany({
-      where: { userId },
-      orderBy: { createdAt: 'desc' },
-    });
-    return { consent: this.consent(), methods: rows.map(toView) };
+    const [rows, pending] = await Promise.all([
+      this.prisma.savedPaymentMethod.findMany({
+        where: {
+          userId,
+          status: SavedCardStatus.ACTIVE,
+          authorizationEnabled: true,
+          revokedAt: null,
+          removedAt: null,
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.savedPaymentMethod.findFirst({
+        where: { userId, status: SavedCardStatus.PENDING },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+    return {
+      consent: this.consent(),
+      methods: rows.map(toView),
+      pendingRegistration: pending ? toPendingRegistration(pending) : null,
+    };
   }
 
   async start(user: User, accepted: boolean) {
@@ -97,11 +120,6 @@ export class SavedCardService {
     const existing = await this.prisma.savedPaymentMethod.findFirst({
       where: { openCardSlot: user.id },
     });
-    if (existing?.status === SavedCardStatus.ACTIVE) {
-      throw new ConflictException(
-        'Revoke or remove the saved card before registering another',
-      );
-    }
     if (existing) {
       throw new ConflictException('A card registration is already in progress');
     }
@@ -183,34 +201,39 @@ export class SavedCardService {
       if (parsed.outcome === 'pending') {
         return { pending: true, savedCard: toView(row) };
       }
-      await this.prisma.savedPaymentMethod.updateMany({
-        where: { id: row.id, status: SavedCardStatus.PENDING },
-        data: {
-          status: SavedCardStatus.FAILED,
-          authorizationEnabled: false,
-          openCardSlot: null,
-          payherePaymentId: parsed.providerPaymentId || null,
-        },
-      });
+      await this.prisma.$transaction((tx) =>
+        tx.savedPaymentMethod.updateMany({
+          where: { id: row.id, status: SavedCardStatus.PENDING },
+          data: {
+            status: SavedCardStatus.FAILED,
+            authorizationEnabled: false,
+            openCardSlot: null,
+            payherePaymentId: parsed.providerPaymentId || null,
+          },
+        }),
+      );
       return { failed: true };
     }
     if (!parsed.customerToken) {
       return { pending: true, savedCard: toView(row) };
     }
     const encrypted = this.crypto.encryptOpaque(parsed.customerToken);
-    const activated = await this.prisma.savedPaymentMethod.updateMany({
-      where: { id: row.id, status: SavedCardStatus.PENDING },
-      data: {
-        status: SavedCardStatus.ACTIVE,
-        authorizationEnabled: true,
-        tokenCiphertext: encrypted.ciphertext,
-        tokenIv: encrypted.iv,
-        tokenTag: encrypted.tag,
-        payherePaymentId: parsed.providerPaymentId || null,
-        cardBrand: parsed.cardBrand,
-        cardLast4: parsed.cardLast4,
-      },
-    });
+    const activated = await this.prisma.$transaction((tx) =>
+      tx.savedPaymentMethod.updateMany({
+        where: { id: row.id, status: SavedCardStatus.PENDING },
+        data: {
+          status: SavedCardStatus.ACTIVE,
+          authorizationEnabled: true,
+          tokenCiphertext: encrypted.ciphertext,
+          tokenIv: encrypted.iv,
+          tokenTag: encrypted.tag,
+          openCardSlot: null,
+          payherePaymentId: parsed.providerPaymentId || null,
+          cardBrand: parsed.cardBrand,
+          cardLast4: parsed.cardLast4,
+        },
+      }),
+    );
     if (activated.count === 0) {
       const current = await this.prisma.savedPaymentMethod.findUniqueOrThrow({
         where: { id: row.id },
@@ -350,6 +373,14 @@ export function savedCardIsChargeable(row: {
     row.removedAt === null &&
     Boolean(row.tokenCiphertext && row.tokenIv && row.tokenTag)
   );
+}
+
+function toPendingRegistration(row: SavedPaymentMethod): PendingRegistrationView {
+  return {
+    id: row.id,
+    status: SavedCardStatus.PENDING,
+    consentedAt: row.consentedAt,
+  };
 }
 
 function toView(row: SavedPaymentMethod): SavedCardView {

@@ -18,16 +18,21 @@ export class SavedCardChargeController {
 
   @Post(':consultationId/proposals/:proposalId/checkout/saved-card')
   @ApiOperation({
-    summary: 'Pay an accepted consultation with the saved card',
+    summary: 'Pay an accepted consultation with a selected saved card',
     description:
-      'Charges only after the customer sends confirmSavedCardPayment: true. The amount and currency come from the accepted consultation, not the request body. One PayHere Charging API call is made for a new attempt. A repeated request returns the existing attempt and does not charge again. Manual checkout remains POST .../checkout and does not require a saved card. Accepting a proposal does not charge the card.',
+      'Charges the savedCardId sent by the customer after the server checks ownership and eligibility. The amount and currency come from the accepted consultation, not the request body. One PayHere Charging API call is made for a new attempt. A repeated request returns the existing attempt, keeps its saved card, and does not charge again. Manual checkout remains POST .../checkout. Accepting a proposal does not charge the card.',
   })
   charge(
     @CurrentUser() user: User,
     @Param('consultationId') consultationId: string,
     @Param('proposalId') proposalId: string,
-    @Body() _dto: SavedCardCheckoutDto,
+    @Body() dto: SavedCardCheckoutDto,
   ) {
-    return this.charges.charge(user, consultationId, proposalId);
+    return this.charges.charge(
+      user,
+      consultationId,
+      proposalId,
+      dto.savedCardId,
+    );
   }
 }

@@ -31,9 +31,9 @@ export class SavedCardController {
 
   @Get()
   @ApiOperation({
-    summary: 'Saved-card status and the current automatic-payment consent',
+    summary: 'Usable saved cards and any in-progress registration',
     description:
-      'Returns the consent text the customer must accept, and safe display fields for that customer’s cards. Tokens, secrets, and raw PayHere notifications are not included.',
+      'Returns the consent text the customer must accept, usable ACTIVE cards, and at most one PENDING registration. FAILED, DISABLED, and REMOVED rows stay stored and are omitted. Tokens, secrets, and raw PayHere notifications are not included.',
   })
   @ApiForbiddenResponse({ description: 'PUBLIC role required' })
   list(@CurrentUser() user: User) {

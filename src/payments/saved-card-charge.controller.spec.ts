@@ -22,7 +22,7 @@ describe('Saved-card checkout authorization', () => {
     } as never;
   }
 
-  it('allows only the public customer and requires explicit confirmation', async () => {
+  it('allows only the public customer and requires a saved card id', async () => {
     expect(reflector.get(ROLES_KEY, SavedCardChargeController)).toEqual([
       UserRole.PUBLIC,
     ]);
@@ -31,9 +31,13 @@ describe('Saved-card checkout authorization', () => {
     );
     expect(guard.canActivate(context(UserRole.PUBLIC))).toBe(true);
     const accepted = new SavedCardCheckoutDto();
-    accepted.confirmSavedCardPayment = true;
+    accepted.savedCardId = 'card-1';
     expect(await validate(accepted)).toHaveLength(0);
     const missing = new SavedCardCheckoutDto();
     expect(await validate(missing)).not.toHaveLength(0);
+    const legacy = new SavedCardCheckoutDto();
+    (legacy as { confirmSavedCardPayment?: boolean }).confirmSavedCardPayment =
+      true;
+    expect(await validate(legacy)).not.toHaveLength(0);
   });
 });

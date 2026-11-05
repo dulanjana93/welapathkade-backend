@@ -723,14 +723,19 @@ model PaymentAttempt {
   requiresReview    Boolean         @default(false)
   /// Payment id while a saved-card charge is in flight, pending, or uncertain.
   openChargeSlot    String?         @unique @db.VarChar(191)
+  /// Card selected for this charge. Null on attempts created before selection.
+  /// Removal of the card must not delete the attempt.
+  savedPaymentMethodId String?
   createdAt         DateTime        @default(now())
   updatedAt         DateTime        @updatedAt
 
-  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  payment            Payment             @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  savedPaymentMethod SavedPaymentMethod? @relation(fields: [savedPaymentMethodId], references: [id], onDelete: Restrict)
 
   @@index([paymentId])
   @@index([status])
   @@index([requiresReview])
+  @@index([savedPaymentMethodId])
 }
 
 /// Verified PayHere server notification. Card fields are never stored.
@@ -805,13 +810,16 @@ model SavedPaymentMethod {
   authorizationEnabled  Boolean         @default(false)
   revokedAt             DateTime?
   removedAt             DateTime?
-  /// User id while this card is PENDING or ACTIVE. Null after it can be replaced.
+  /// User id while a registration is PENDING. Null for ACTIVE, FAILED,
+  /// DISABLED, and REMOVED, so a customer can keep more than one active card.
+  /// The unique index still allows only one in-flight registration.
   openCardSlot          String?         @unique @db.VarChar(191)
   createdAt             DateTime        @default(now())
   updatedAt             DateTime        @updatedAt
 
-  user   User                    @relation(fields: [userId], references: [id], onDelete: Restrict)
-  events SavedCardConsentEvent[]
+  user            User                    @relation(fields: [userId], references: [id], onDelete: Restrict)
+  events          SavedCardConsentEvent[]
+  paymentAttempts PaymentAttempt[]
 
   @@index([userId, status])
 }
