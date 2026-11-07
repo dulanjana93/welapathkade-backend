@@ -1,8 +1,10 @@
 import {
   BadRequestException,
   ConflictException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { payHereLogContainsForbidden } from './payhere/payhere-diagnostics';
 import {
   PaymentProvider,
   Prisma,
@@ -233,6 +235,7 @@ describe('SavedCardService', () => {
     prisma as never,
     payhere,
     crypto,
+    null,
   );
 
   beforeEach(() => {
@@ -580,5 +583,236 @@ describe('SavedCardService', () => {
         SavedCardStatus.REMOVED,
       ].sort(),
     );
+  });
+});
+
+describe('SavedCardService preapproval notify diagnostics', () => {
+  const cards: SavedPaymentMethod[] = [];
+  const events: SavedCardConsentEvent[] = [];
+  let seq = 0;
+  const crypto = new BankAccountCrypto({
+    getOrThrow: () => 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=',
+  } as never);
+  const payhere = {
+    createPreapproval: jest.fn(),
+    verifyPreapproval: jest.fn(),
+  };
+  const user = {
+    id: 'user-diag',
+    role: UserRole.PUBLIC,
+    phone: '+94770001111',
+    name: 'Diag',
+    billingFirstName: 'Diag',
+    billingLastName: 'User',
+    billingEmail: 'diag@example.com',
+    billingAddress: '1 Road',
+    billingCity: 'Colombo',
+    billingCountry: 'LK',
+  } as User;
+
+  const prisma = {
+    savedPaymentMethod: {
+      findUnique: jest.fn(async ({ where }: { where: { merchantReference?: string; id?: string } }) => {
+        if (where.merchantReference) {
+          return cards.find((row) => row.merchantReference === where.merchantReference) ?? null;
+        }
+        return cards.find((row) => row.id === where.id) ?? null;
+      }),
+      findUniqueOrThrow: jest.fn(async ({ where }: { where: { id: string } }) => {
+        const row = cards.find((item) => item.id === where.id);
+        if (!row) throw new Error('missing');
+        return row;
+      }),
+      updateMany: jest.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: { id: string; status?: SavedCardStatus };
+          data: Partial<SavedPaymentMethod>;
+        }) => {
+          const row = cards.find(
+            (item) =>
+              item.id === where.id &&
+              (where.status === undefined || item.status === where.status),
+          );
+          if (!row) return { count: 0 };
+          Object.assign(row, data);
+          return { count: 1 };
+        },
+      ),
+    },
+    $transaction: jest.fn(async (work: (tx: unknown) => Promise<unknown>) =>
+      work(prisma),
+    ),
+  };
+
+  const service = new SavedCardService(prisma as never, payhere, crypto, null);
+  let logSpy: jest.SpyInstance;
+  let warnSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    cards.splice(0, cards.length);
+    events.splice(0, events.length);
+    seq = 0;
+    jest.clearAllMocks();
+    logSpy = jest
+      .spyOn(Logger.prototype, 'log')
+      .mockImplementation(() => undefined);
+    warnSpy = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  function pendingCard() {
+    seq += 1;
+    const row = {
+      id: `card-${seq}`,
+      userId: user.id,
+      provider: PaymentProvider.PAYHERE,
+      status: SavedCardStatus.PENDING,
+      merchantReference: `pa_diag_${seq}`,
+      payherePaymentId: null,
+      tokenCiphertext: null,
+      tokenIv: null,
+      tokenTag: null,
+      cardBrand: null,
+      cardLast4: null,
+      consentVersion: AUTOMATIC_PAYMENT_CONSENT_VERSION,
+      consentedAt: new Date(),
+      authorizationEnabled: false,
+      revokedAt: null,
+      removedAt: null,
+      openCardSlot: user.id,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as SavedPaymentMethod;
+    cards.push(row);
+    return row;
+  }
+
+  function rendered() {
+    return JSON.stringify([...logSpy.mock.calls, ...warnSpy.mock.calls]);
+  }
+
+  it('logs activation without tokens or card secrets', async () => {
+    const row = pendingCard();
+    payhere.verifyPreapproval.mockReturnValue({
+      merchantReference: row.merchantReference,
+      providerPaymentId: '9002',
+      statusCode: 2,
+      outcome: 'success',
+      success: true,
+      customerToken: TOKEN,
+      cardBrand: 'VISA',
+      cardLast4: '4564',
+    });
+    await service.handleNotify({
+      order_id: row.merchantReference,
+      customer_token: TOKEN,
+      card_no: '************4564',
+      md5sig: 'should-not-log',
+    });
+    expect(
+      logSpy.mock.calls.some(
+        (call) =>
+          (call[0] as { event?: string }).event ===
+          'payhere.preapproval.notify.activated',
+      ),
+    ).toBe(true);
+    expect(payHereLogContainsForbidden(rendered(), [TOKEN, 'should-not-log'])).toBeNull();
+    expect(rendered()).not.toContain(TOKEN);
+    expect(rendered()).not.toContain('************4564');
+  });
+
+  it('logs a failed registration', async () => {
+    const row = pendingCard();
+    payhere.verifyPreapproval.mockReturnValue({
+      merchantReference: row.merchantReference,
+      providerPaymentId: '9001',
+      statusCode: -1,
+      outcome: 'failed',
+      success: false,
+      customerToken: null,
+      cardBrand: null,
+      cardLast4: null,
+    });
+    await service.handleNotify({ order_id: row.merchantReference });
+    expect(
+      logSpy.mock.calls.some(
+        (call) =>
+          (call[0] as { event?: string }).event ===
+            'payhere.preapproval.notify.failed' &&
+          (call[0] as { statusCode?: number }).statusCode === -1,
+      ),
+    ).toBe(true);
+  });
+
+  it('logs an invalid signature', async () => {
+    payhere.verifyPreapproval.mockImplementation(() => {
+      throw new PayHereNotificationError('Invalid signature');
+    });
+    await expect(
+      service.handleNotify({ order_id: 'pa_bad', md5sig: '00' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(
+      warnSpy.mock.calls.some(
+        (call) =>
+          (call[0] as { event?: string }).event ===
+          'payhere.preapproval.notify.invalid_signature',
+      ),
+    ).toBe(true);
+  });
+
+  it('logs an unknown reference', async () => {
+    payhere.verifyPreapproval.mockReturnValue({
+      merchantReference: 'pa_missing',
+      providerPaymentId: '',
+      statusCode: 2,
+      outcome: 'success',
+      success: true,
+      customerToken: TOKEN,
+      cardBrand: null,
+      cardLast4: null,
+    });
+    await expect(service.handleNotify({ order_id: 'pa_missing' })).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(
+      warnSpy.mock.calls.some(
+        (call) =>
+          (call[0] as { event?: string }).event ===
+          'payhere.preapproval.notify.unknown_reference',
+      ),
+    ).toBe(true);
+  });
+
+  it('logs a duplicate callback for an already-active card', async () => {
+    const row = pendingCard();
+    row.status = SavedCardStatus.ACTIVE;
+    row.openCardSlot = null;
+    payhere.verifyPreapproval.mockReturnValue({
+      merchantReference: row.merchantReference,
+      providerPaymentId: '9002',
+      statusCode: 2,
+      outcome: 'success',
+      success: true,
+      customerToken: TOKEN,
+      cardBrand: 'VISA',
+      cardLast4: '1111',
+    });
+    await service.handleNotify({ order_id: row.merchantReference });
+    expect(
+      logSpy.mock.calls.some(
+        (call) =>
+          (call[0] as { event?: string }).event ===
+          'payhere.preapproval.notify.duplicate',
+      ),
+    ).toBe(true);
   });
 });

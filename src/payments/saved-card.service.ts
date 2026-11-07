@@ -4,6 +4,7 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import {
   PaymentProvider,
@@ -20,6 +21,16 @@ import {
   billingProfileIncompleteException,
 } from '../users/billing-profile';
 import { BankAccountCrypto } from '../withdrawals/bank-account.crypto';
+import {
+  payHereErrorCategory,
+  payHereErrorName,
+  type PayHereLogSink,
+} from './payhere/payhere-diagnostics';
+import {
+  createPayHereDiagnosticLogger,
+  PAYHERE_FILE_LOG,
+  type PayHereFileLogSink,
+} from './payhere/payhere-file-log.sink';
 import { PayHereNotificationError } from './payhere/payhere-signature';
 import type { PayHereGateway } from './payhere/payhere.gateway';
 import { PAYHERE_MERCHANT } from './payhere-refund.service';
@@ -66,12 +77,21 @@ const RETIRED = {
  */
 @Injectable()
 export class SavedCardService {
+  private readonly logger: PayHereLogSink;
+
   constructor(
     private readonly prisma: PrismaService,
     @Inject(PAYHERE_MERCHANT)
     private readonly payhere: PreapprovalClient | null,
     private readonly crypto: BankAccountCrypto,
-  ) {}
+    @Optional()
+    @Inject(PAYHERE_FILE_LOG)
+    fileLog?: PayHereFileLogSink | null,
+  ) {
+    this.logger = createPayHereDiagnosticLogger(SavedCardService.name, {
+      fileSink: fileLog === undefined ? undefined : fileLog,
+    });
+  }
 
   consent() {
     return {
@@ -179,10 +199,36 @@ export class SavedCardService {
     if (!this.payhere) {
       throw new NotFoundException('PayHere notifications are not enabled');
     }
+    const receivedAt = new Date().toISOString();
+    const hintedReference =
+      typeof fields.order_id === 'string' && fields.order_id.length > 0
+        ? fields.order_id
+        : null;
+    this.logger.log({
+      event: 'payhere.preapproval.notify.received',
+      receivedAt,
+      merchantReference: hintedReference,
+    });
     let parsed: ReturnType<PreapprovalClient['verifyPreapproval']>;
     try {
       parsed = this.payhere.verifyPreapproval(fields);
     } catch (error) {
+      const category =
+        error instanceof PayHereNotificationError
+          ? payHereErrorCategory(error)
+          : 'malformed';
+      this.logger.warn({
+        event:
+          category === 'invalid_signature'
+            ? 'payhere.preapproval.notify.invalid_signature'
+            : 'payhere.preapproval.notify.rejected',
+        receivedAt,
+        merchantReference: hintedReference,
+        signatureValid: category === 'invalid_signature' ? false : null,
+        outcome: 'rejected',
+        errorCategory: category,
+        errorName: payHereErrorName(error),
+      });
       if (error instanceof PayHereNotificationError) {
         throw new BadRequestException('Invalid PayHere notification');
       }
@@ -192,64 +238,151 @@ export class SavedCardService {
       where: { merchantReference: parsed.merchantReference },
     });
     if (!row) {
+      this.logger.warn({
+        event: 'payhere.preapproval.notify.unknown_reference',
+        receivedAt,
+        merchantReference: parsed.merchantReference,
+        signatureValid: true,
+        statusCode: parsed.statusCode,
+        outcome: 'unknown_reference',
+      });
       throw new NotFoundException('Saved card registration not found');
     }
     if (row.status !== SavedCardStatus.PENDING) {
+      this.logger.log({
+        event: 'payhere.preapproval.notify.duplicate',
+        receivedAt,
+        savedCardId: row.id,
+        merchantReference: parsed.merchantReference,
+        signatureValid: true,
+        statusCode: parsed.statusCode,
+        outcome: 'duplicate',
+        savedCardStatus: row.status,
+      });
       return { alreadyHandled: true, savedCard: toView(row) };
     }
-    if (parsed.outcome === 'pending' || !parsed.success) {
-      if (parsed.outcome === 'pending') {
+    try {
+      if (parsed.outcome === 'pending' || !parsed.success) {
+        if (parsed.outcome === 'pending') {
+          this.logger.log({
+            event: 'payhere.preapproval.notify.pending',
+            receivedAt,
+            savedCardId: row.id,
+            merchantReference: parsed.merchantReference,
+            signatureValid: true,
+            statusCode: parsed.statusCode,
+            outcome: 'pending',
+          });
+          return { pending: true, savedCard: toView(row) };
+        }
+        await this.prisma.$transaction((tx) =>
+          tx.savedPaymentMethod.updateMany({
+            where: { id: row.id, status: SavedCardStatus.PENDING },
+            data: {
+              status: SavedCardStatus.FAILED,
+              authorizationEnabled: false,
+              openCardSlot: null,
+              payherePaymentId: parsed.providerPaymentId || null,
+            },
+          }),
+        );
+        this.logger.log({
+          event: 'payhere.preapproval.notify.failed',
+          receivedAt,
+          savedCardId: row.id,
+          merchantReference: parsed.merchantReference,
+          signatureValid: true,
+          statusCode: parsed.statusCode,
+          outcome: 'failed',
+        });
+        return { failed: true };
+      }
+      if (!parsed.customerToken) {
+        this.logger.log({
+          event: 'payhere.preapproval.notify.pending',
+          receivedAt,
+          savedCardId: row.id,
+          merchantReference: parsed.merchantReference,
+          signatureValid: true,
+          statusCode: parsed.statusCode,
+          outcome: 'pending_missing_token',
+        });
         return { pending: true, savedCard: toView(row) };
       }
-      await this.prisma.$transaction((tx) =>
+      const encrypted = this.crypto.encryptOpaque(parsed.customerToken);
+      const activated = await this.prisma.$transaction((tx) =>
         tx.savedPaymentMethod.updateMany({
           where: { id: row.id, status: SavedCardStatus.PENDING },
           data: {
-            status: SavedCardStatus.FAILED,
-            authorizationEnabled: false,
+            status: SavedCardStatus.ACTIVE,
+            authorizationEnabled: true,
+            tokenCiphertext: encrypted.ciphertext,
+            tokenIv: encrypted.iv,
+            tokenTag: encrypted.tag,
             openCardSlot: null,
             payherePaymentId: parsed.providerPaymentId || null,
+            cardBrand: parsed.cardBrand,
+            cardLast4: parsed.cardLast4,
           },
         }),
       );
-      return { failed: true };
-    }
-    if (!parsed.customerToken) {
-      return { pending: true, savedCard: toView(row) };
-    }
-    const encrypted = this.crypto.encryptOpaque(parsed.customerToken);
-    const activated = await this.prisma.$transaction((tx) =>
-      tx.savedPaymentMethod.updateMany({
-        where: { id: row.id, status: SavedCardStatus.PENDING },
-        data: {
+      if (activated.count === 0) {
+        const current = await this.prisma.savedPaymentMethod.findUniqueOrThrow({
+          where: { id: row.id },
+        });
+        this.logger.log({
+          event: 'payhere.preapproval.notify.duplicate',
+          receivedAt,
+          savedCardId: current.id,
+          merchantReference: parsed.merchantReference,
+          signatureValid: true,
+          statusCode: parsed.statusCode,
+          outcome: 'duplicate',
+          savedCardStatus: current.status,
+        });
+        return { alreadyHandled: true, savedCard: toView(current) };
+      }
+      this.logger.log({
+        event: 'payhere.preapproval.notify.activated',
+        receivedAt,
+        savedCardId: row.id,
+        merchantReference: parsed.merchantReference,
+        signatureValid: true,
+        statusCode: parsed.statusCode,
+        outcome: 'activated',
+        hasProviderPaymentId: Boolean(parsed.providerPaymentId),
+      });
+      return {
+        active: true,
+        savedCard: toView({
+          ...row,
           status: SavedCardStatus.ACTIVE,
           authorizationEnabled: true,
-          tokenCiphertext: encrypted.ciphertext,
-          tokenIv: encrypted.iv,
-          tokenTag: encrypted.tag,
-          openCardSlot: null,
-          payherePaymentId: parsed.providerPaymentId || null,
           cardBrand: parsed.cardBrand,
           cardLast4: parsed.cardLast4,
-        },
-      }),
-    );
-    if (activated.count === 0) {
-      const current = await this.prisma.savedPaymentMethod.findUniqueOrThrow({
-        where: { id: row.id },
+        }),
+      };
+    } catch (error) {
+      if (
+        error instanceof BadRequestException ||
+        error instanceof NotFoundException ||
+        error instanceof ConflictException
+      ) {
+        throw error;
+      }
+      this.logger.error({
+        event: 'payhere.preapproval.notify.exception',
+        receivedAt,
+        savedCardId: row.id,
+        merchantReference: parsed.merchantReference,
+        signatureValid: true,
+        statusCode: parsed.statusCode,
+        outcome: 'exception',
+        errorCategory: payHereErrorCategory(error),
+        errorName: payHereErrorName(error),
       });
-      return { alreadyHandled: true, savedCard: toView(current) };
+      throw error;
     }
-    return {
-      active: true,
-      savedCard: toView({
-        ...row,
-        status: SavedCardStatus.ACTIVE,
-        authorizationEnabled: true,
-        cardBrand: parsed.cardBrand,
-        cardLast4: parsed.cardLast4,
-      }),
-    };
   }
 
   async revoke(userId: string, id: string) {

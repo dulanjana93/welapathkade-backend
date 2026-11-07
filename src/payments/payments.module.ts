@@ -8,6 +8,12 @@ import { WithdrawalsModule } from '../withdrawals/withdrawals.module';
 import { AppointmentLifecycleService } from './appointment-lifecycle.service';
 import { MockPaymentGateway } from './mock-payment.gateway';
 import { PayHereGateway } from './payhere/payhere.gateway';
+import {
+  createPayHereDiagnosticLogger,
+  PAYHERE_FILE_LOG,
+  PayHereFileLogSink,
+  resolvePayHereLogPath,
+} from './payhere/payhere-file-log.sink';
 import { readPayHereSettings } from './payhere/payhere.settings';
 import { PAYHERE_MERCHANT, PayHereRefundService } from './payhere-refund.service';
 import { PAYMENT_GATEWAY, type PaymentGateway } from './payment-gateway';
@@ -87,12 +93,26 @@ export function selectPaymentGateway(
     SavedCardChargeService,
     MockPaymentGateway,
     {
+      provide: PAYHERE_FILE_LOG,
+      useFactory: (): PayHereFileLogSink =>
+        new PayHereFileLogSink(resolvePayHereLogPath()),
+    },
+    {
       provide: PAYHERE_MERCHANT,
-      inject: [ConfigService],
-      useFactory: (config: ConfigService): PayHereGateway | null => {
+      inject: [ConfigService, PAYHERE_FILE_LOG],
+      useFactory: (
+        config: ConfigService,
+        fileLog: PayHereFileLogSink,
+      ): PayHereGateway | null => {
         const mode = config.get<string>('app.payhereMode');
         if (mode !== 'sandbox' && mode !== 'live') return null;
-        return new PayHereGateway(readPayHereSettings(config));
+        return new PayHereGateway(
+          readPayHereSettings(config),
+          globalThis.fetch,
+          createPayHereDiagnosticLogger(PayHereGateway.name, {
+            fileSink: fileLog,
+          }),
+        );
       },
     },
     {

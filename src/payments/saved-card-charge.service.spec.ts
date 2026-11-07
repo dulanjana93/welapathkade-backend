@@ -727,6 +727,7 @@ describe('SavedCardChargeService', () => {
           currency: 'LKR',
           providerPaymentId: '320025014001',
         }),
+        { reason: 'post_charge' },
       );
     },
   );
@@ -785,6 +786,7 @@ describe('SavedCardChargeService', () => {
         currency: 'LKR',
         providerPaymentId: undefined,
       }),
+      { reason: 'post_charge' },
     );
   });
 

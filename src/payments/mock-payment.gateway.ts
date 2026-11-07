@@ -83,6 +83,12 @@ export class MockPaymentGateway implements PaymentGateway {
 
   async verifyByReference(
     merchantReference: string,
+    _expected?: {
+      amount: string;
+      currency: string;
+      providerPaymentId?: string;
+    },
+    _options?: { reason?: string },
   ): Promise<VerifyByReferenceResult> {
     const record = this.paid.get(merchantReference);
     if (!record) {

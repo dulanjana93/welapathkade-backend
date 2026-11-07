@@ -2,6 +2,8 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Logger,
+  NotFoundException,
 } from '@nestjs/common';
 import {
   AppointmentStatus,
@@ -12,6 +14,8 @@ import {
 } from '@prisma/client';
 import { PaymentsService } from './payments.service';
 import { evaluateSettlementEligibility } from '../settlement/settlement-eligibility';
+import { PayHereNotificationError } from './payhere/payhere-signature';
+import { payHereLogContainsForbidden } from './payhere/payhere-diagnostics';
 
 describe('PaymentsService.finalizeVerified', () => {
   // Transaction client used by recordFailure (failure callbacks).
@@ -345,11 +349,17 @@ describe('PaymentsService.finalizeVerified', () => {
         bookingGuard as never,
         gw as never,
         notifications as never,
+        undefined,
+        null,
       );
       jest.spyOn(svc, 'getForCustomer').mockResolvedValue(view as never);
       const finalize = jest
         .spyOn(svc, 'finalizeVerified')
         .mockResolvedValue({} as never);
+      prisma.paymentAttempt.findUnique.mockResolvedValue({
+        id: 'att-1',
+        openChargeSlot: null,
+      });
       return { svc, finalize };
     }
 
@@ -372,10 +382,25 @@ describe('PaymentsService.finalizeVerified', () => {
         currency: 'LKR',
         providerPaymentId: 'pp-1',
       });
+      const logSpy = jest
+        .spyOn(Logger.prototype, 'log')
+        .mockImplementation(() => undefined);
       await svc.syncForCustomer(customer, 'c-1');
       expect(finalize).toHaveBeenCalledWith(
         expect.objectContaining({ amount: '1500.00', currency: 'LKR' }),
       );
+      const finalizedLogs = logSpy.mock.calls.filter(
+        (call) =>
+          (call[0] as { event?: string }).event === 'payhere.payment.finalized',
+      );
+      expect(finalizedLogs).toHaveLength(1);
+      expect(finalizedLogs[0][0]).toMatchObject({
+        attemptId: 'att-1',
+        merchantReference: 'wp_ref',
+        responseClassification: 'customer_sync:retrieval_confirmed',
+        source: 'customer_sync',
+      });
+      logSpy.mockRestore();
     });
   });
 
@@ -1033,5 +1058,156 @@ describe('PaymentsService.finalizeVerified', () => {
         (gateway as { createCheckout: jest.Mock }).createCheckout,
       ).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('PayHere notify diagnostics', () => {
+  let logSpy: jest.SpyInstance;
+  let warnSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    logSpy = jest
+      .spyOn(Logger.prototype, 'log')
+      .mockImplementation(() => undefined);
+    warnSpy = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  function renderedLogs() {
+    return JSON.stringify([...logSpy.mock.calls, ...warnSpy.mock.calls]);
+  }
+
+  it('logs an invalid callback signature without the raw payload', async () => {
+    const payhere = {
+      provider: 'PAYHERE',
+      verifyNotification: () => {
+        throw new PayHereNotificationError('Invalid signature');
+      },
+    };
+    const svc = new PaymentsService(
+      { paymentAttempt: { findUnique: jest.fn() } } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      payhere as never,
+      {
+        notifyUser: jest.fn(),
+        notifyAstrologerProfile: jest.fn(),
+        deliverAfterCommit: jest.fn(),
+      } as never,
+    );
+    await expect(
+      svc.handlePayHereNotify({
+        order_id: 'sc_ref_1',
+        md5sig: 'bad',
+        customer_token: 'token-must-not-log',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(
+      warnSpy.mock.calls.some(
+        (call) =>
+          (call[0] as { event?: string }).event ===
+          'payhere.notify.invalid_signature',
+      ),
+    ).toBe(true);
+    expect(payHereLogContainsForbidden(renderedLogs(), ['token-must-not-log'])).toBeNull();
+    expect(renderedLogs()).not.toContain('token-must-not-log');
+  });
+
+  it('logs successful callback processing', async () => {
+    const localPrisma = {
+      paymentAttempt: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'att-1' }),
+      },
+      payHereNotification: { create: jest.fn().mockResolvedValue({ id: 'n-1' }) },
+    };
+    const payhere = {
+      provider: 'PAYHERE',
+      verifyNotification: () => ({
+        outcome: 'pending',
+        success: false,
+        merchantReference: 'sc_ref_1',
+        providerPaymentId: '320025014001',
+        statusCode: 0,
+        amount: '1500.00',
+        currency: 'LKR',
+        sanitized: { status_code: '0', order_id: 'sc_ref_1' },
+      }),
+    };
+    const svc = new PaymentsService(
+      localPrisma as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      payhere as never,
+      {
+        notifyUser: jest.fn(),
+        notifyAstrologerProfile: jest.fn(),
+        deliverAfterCommit: jest.fn(),
+      } as never,
+    );
+    await expect(
+      svc.handlePayHereNotify({ order_id: 'sc_ref_1' }),
+    ).resolves.toEqual({ pending: true });
+    expect(
+      logSpy.mock.calls.some(
+        (call) =>
+          (call[0] as { event?: string }).event === 'payhere.notify.received',
+      ),
+    ).toBe(true);
+    expect(
+      logSpy.mock.calls.some(
+        (call) =>
+          (call[0] as { event?: string }).event === 'payhere.notify.processed' &&
+          (call[0] as { outcome?: string }).outcome === 'pending',
+      ),
+    ).toBe(true);
+    expect(payHereLogContainsForbidden(renderedLogs())).toBeNull();
+  });
+
+  it('logs an unknown merchant reference', async () => {
+    const payhere = {
+      provider: 'PAYHERE',
+      verifyNotification: () => ({
+        outcome: 'success',
+        success: true,
+        merchantReference: 'sc_missing',
+        providerPaymentId: '1',
+        statusCode: 2,
+        amount: '1500.00',
+        currency: 'LKR',
+        sanitized: {},
+      }),
+    };
+    const svc = new PaymentsService(
+      {
+        paymentAttempt: { findUnique: jest.fn().mockResolvedValue(null) },
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      payhere as never,
+      {
+        notifyUser: jest.fn(),
+        notifyAstrologerProfile: jest.fn(),
+        deliverAfterCommit: jest.fn(),
+      } as never,
+    );
+    await expect(svc.handlePayHereNotify({ order_id: 'sc_missing' })).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(
+      warnSpy.mock.calls.some(
+        (call) =>
+          (call[0] as { event?: string }).event ===
+          'payhere.notify.unknown_reference',
+      ),
+    ).toBe(true);
   });
 });

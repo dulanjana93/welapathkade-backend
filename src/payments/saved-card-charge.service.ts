@@ -43,6 +43,12 @@ import { CHECKOUT_BLOCKED_STATUSES } from './appointment.state';
 import { attemptRequiresReconciliation } from './attempt-reconciliation';
 import { PaymentsService } from './payments.service';
 import { PAYHERE_MERCHANT } from './payhere-refund.service';
+import type { PayHereLogSink } from './payhere/payhere-diagnostics';
+import {
+  createPayHereDiagnosticLogger,
+  PAYHERE_FILE_LOG,
+  type PayHereFileLogSink,
+} from './payhere/payhere-file-log.sink';
 import {
   PayHereChargeNotSentError,
   PayHereRateLimitError,
@@ -86,6 +92,8 @@ type ClaimResult = Claimed | { kind: 'existing'; view: SavedCardChargeView };
  */
 @Injectable()
 export class SavedCardChargeService {
+  private readonly logger: PayHereLogSink;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly availability: AvailabilityService,
@@ -96,7 +104,14 @@ export class SavedCardChargeService {
     @Optional()
     @Inject(PAYHERE_MERCHANT)
     private readonly payhere?: PayHereGateway | null,
-  ) {}
+    @Optional()
+    @Inject(PAYHERE_FILE_LOG)
+    fileLog?: PayHereFileLogSink | null,
+  ) {
+    this.logger = createPayHereDiagnosticLogger(SavedCardChargeService.name, {
+      fileSink: fileLog === undefined ? undefined : fileLog,
+    });
+  }
 
   async charge(
     user: User,
@@ -175,6 +190,7 @@ export class SavedCardChargeService {
           customerToken: token,
         },
         {
+          attemptId: claimed.attemptId,
           beforeDispatch: () =>
             this.authorizeDispatch(user.id, cardId, claimed.attemptId),
         },
@@ -185,13 +201,27 @@ export class SavedCardChargeService {
         error instanceof PayHereRateLimitError
       ) {
         await this.releaseUnsent(claimed.attemptId);
+        const released = await this.loadChargeOutcome(
+          claimed.appointmentId,
+          claimed.attemptId,
+        );
+        this.logFinalized({
+          attemptId: claimed.attemptId,
+          merchantReference: claimed.merchantReference,
+          classification: 'not_sent',
+          view: released.view,
+          chargeSlotOccupied: released.chargeSlotOccupied,
+        });
         throw new HttpException(
           'Saved-card payment was not sent. You can try again.',
           HttpStatus.SERVICE_UNAVAILABLE,
         );
       }
       await this.markUncertain(claimed.attemptId);
-      return this.viewFor(claimed.appointmentId, claimed.attemptId);
+      return this.viewForLogged(
+        claimed,
+        'charge_exception',
+      );
     }
     return this.applyResult(claimed, result);
   }
@@ -256,6 +286,7 @@ export class SavedCardChargeService {
         currency: attempt.payment.currency,
         providerPaymentId: attempt.providerPaymentId ?? undefined,
       },
+      { reason: 'manual_reconciliation' },
     );
     if (
       verified.success &&
@@ -517,10 +548,11 @@ export class SavedCardChargeService {
           currency: PAYMENT_CURRENCY,
           providerPaymentId: hintedPaymentId,
         },
+        { reason: 'post_charge' },
       );
     } catch {
       await this.markUncertain(claimed.attemptId);
-      return this.viewFor(claimed.appointmentId, claimed.attemptId);
+      return this.viewForLogged(claimed, `${result.kind}:retrieval_error`);
     }
     if (
       verified.success &&
@@ -539,13 +571,56 @@ export class SavedCardChargeService {
           outcome: 'success',
           raw: { source: 'saved-card-retrieval' },
         });
+        return this.viewForLogged(claimed, `${result.kind}:retrieval_confirmed`);
       } catch {
         await this.markUncertain(claimed.attemptId);
+        return this.viewForLogged(claimed, `${result.kind}:finalize_error`);
       }
-      return this.viewFor(claimed.appointmentId, claimed.attemptId);
     }
     await this.markUncertain(claimed.attemptId);
-    return this.viewFor(claimed.appointmentId, claimed.attemptId);
+    const retrievalClass = verified.ambiguous
+      ? 'retrieval_ambiguous'
+      : verified.success
+        ? 'retrieval_incomplete'
+        : 'retrieval_unconfirmed';
+    return this.viewForLogged(claimed, `${result.kind}:${retrievalClass}`);
+  }
+
+  private async viewForLogged(
+    claimed: Claimed,
+    classification: string,
+  ): Promise<SavedCardChargeView> {
+    const loaded = await this.loadChargeOutcome(
+      claimed.appointmentId,
+      claimed.attemptId,
+    );
+    this.logFinalized({
+      attemptId: claimed.attemptId,
+      merchantReference: claimed.merchantReference,
+      classification,
+      view: loaded.view,
+      chargeSlotOccupied: loaded.chargeSlotOccupied,
+    });
+    return loaded.view;
+  }
+
+  private logFinalized(input: {
+    attemptId: string;
+    merchantReference: string;
+    classification: string;
+    view: SavedCardChargeView;
+    chargeSlotOccupied?: boolean | null;
+  }) {
+    this.logger.log({
+      event: 'payhere.payment.finalized',
+      attemptId: input.attemptId,
+      merchantReference: input.merchantReference,
+      responseClassification: input.classification,
+      paymentState: input.view.attemptStatus,
+      appointmentState: input.view.appointmentStatus,
+      reconciliationRequired: input.view.reconciliationRequired,
+      chargeSlotOccupied: input.chargeSlotOccupied ?? null,
+    });
   }
 
   /**
@@ -668,6 +743,16 @@ export class SavedCardChargeService {
     appointmentId: string,
     attemptId: string,
   ): Promise<SavedCardChargeView> {
+    return (await this.loadChargeOutcome(appointmentId, attemptId)).view;
+  }
+
+  private async loadChargeOutcome(
+    appointmentId: string,
+    attemptId: string,
+  ): Promise<{
+    view: SavedCardChargeView;
+    chargeSlotOccupied: boolean;
+  }> {
     const appointment = await this.prisma.appointment.findUniqueOrThrow({
       where: { id: appointmentId },
       include: appointmentInclude,
@@ -676,7 +761,10 @@ export class SavedCardChargeService {
       appointment.payments
         .flatMap((row) => row.attempts)
         .find((row) => row.id === attemptId) ?? latestAttempt(appointment);
-    return toChargeView(appointment, attempt);
+    return {
+      view: toChargeView(appointment, attempt),
+      chargeSlotOccupied: attempt?.openChargeSlot != null,
+    };
   }
 }
 

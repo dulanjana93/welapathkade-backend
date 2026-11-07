@@ -65,5 +65,6 @@ export interface PaymentGateway {
       currency: string;
       providerPaymentId?: string;
     },
+    options?: { reason?: string },
   ): Promise<VerifyByReferenceResult>;
 }

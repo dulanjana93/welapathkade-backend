@@ -37,6 +37,16 @@ import {
   assessBillingProfile,
   billingProfileIncompleteException,
 } from '../users/billing-profile';
+import {
+  payHereErrorCategory,
+  payHereErrorName,
+  type PayHereLogSink,
+} from './payhere/payhere-diagnostics';
+import {
+  createPayHereDiagnosticLogger,
+  PAYHERE_FILE_LOG,
+  type PayHereFileLogSink,
+} from './payhere/payhere-file-log.sink';
 import { PayHereNotificationError } from './payhere/payhere-signature';
 import type { PayHereGateway } from './payhere/payhere.gateway';
 import type { PaymentNotifyOutcome } from './payment-gateway';
@@ -59,6 +69,8 @@ type AppointmentLoaded = Appointment & {
 
 @Injectable()
 export class PaymentsService {
+  private readonly logger: PayHereLogSink;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly availability: AvailabilityService,
@@ -67,7 +79,14 @@ export class PaymentsService {
     @Inject(PAYMENT_GATEWAY) private readonly gateway: PaymentGateway,
     private readonly notifications: NotificationService,
     @Optional() private readonly refunds?: PayHereRefundService,
-  ) {}
+    @Optional()
+    @Inject(PAYHERE_FILE_LOG)
+    fileLog?: PayHereFileLogSink | null,
+  ) {
+    this.logger = createPayHereDiagnosticLogger(PaymentsService.name, {
+      fileSink: fileLog === undefined ? undefined : fileLog,
+    });
+  }
 
   async checkout(user: User, consultationId: string, proposalId: string) {
     if (user.role !== UserRole.PUBLIC) {
@@ -346,13 +365,21 @@ export class PaymentsService {
       return view;
     }
 
-    const verified = await this.gateway.verifyByReference(reference, {
-      amount: view.amount,
-      currency: view.currency,
-    });
+    const verified = await this.gateway.verifyByReference(
+      reference,
+      {
+        amount: view.amount,
+        currency: view.currency,
+      },
+      { reason: 'customer_sync' },
+    );
     if (!verified.success || verified.ambiguous || !verified.amount || !verified.currency) {
       return view;
     }
+    const attempt = await this.prisma.paymentAttempt.findUnique({
+      where: { merchantReference: reference },
+      select: { id: true, openChargeSlot: true },
+    });
     await this.finalizeVerified({
       merchantReference: reference,
       providerPaymentId: verified.providerPaymentId ?? `verify_${reference}`,
@@ -362,7 +389,20 @@ export class PaymentsService {
       outcome: 'success',
       raw: { source: 'sync' },
     });
-    return this.getForCustomer(user, consultationId);
+    const finalized = await this.getForCustomer(user, consultationId);
+    this.logger.log({
+      event: 'payhere.payment.finalized',
+      attemptId: attempt?.id ?? null,
+      merchantReference: reference,
+      responseClassification: 'customer_sync:retrieval_confirmed',
+      paymentState: finalized.payment?.status ?? null,
+      appointmentState: finalized.status,
+      reconciliationRequired:
+        finalized.payment?.latestAttempt?.reconciliationRequired ?? null,
+      chargeSlotOccupied: attempt?.openChargeSlot != null,
+      source: 'customer_sync',
+    });
+    return finalized;
   }
 
   async handleMockNotify(
@@ -394,11 +434,37 @@ export class PaymentsService {
     if (this.gateway.provider !== 'PAYHERE') {
       throw new NotFoundException('PayHere notifications are not enabled');
     }
+    const receivedAt = new Date().toISOString();
+    const hintedReference =
+      typeof fields.order_id === 'string' && fields.order_id.length > 0
+        ? fields.order_id
+        : null;
+    this.logger.log({
+      event: 'payhere.notify.received',
+      receivedAt,
+      merchantReference: hintedReference,
+    });
     const gateway = this.gateway as PayHereGateway;
     let parsed: ReturnType<PayHereGateway['verifyNotification']>;
     try {
       parsed = gateway.verifyNotification(fields);
     } catch (error) {
+      const category =
+        error instanceof PayHereNotificationError
+          ? payHereErrorCategory(error)
+          : 'malformed';
+      this.logger.warn({
+        event:
+          category === 'invalid_signature'
+            ? 'payhere.notify.invalid_signature'
+            : 'payhere.notify.rejected',
+        receivedAt,
+        merchantReference: hintedReference,
+        signatureValid: category !== 'invalid_signature' ? null : false,
+        outcome: 'rejected',
+        errorCategory: category,
+        errorName: payHereErrorName(error),
+      });
       if (error instanceof PayHereNotificationError) {
         throw new BadRequestException('Invalid PayHere notification');
       }
@@ -410,27 +476,92 @@ export class PaymentsService {
       select: { id: true },
     });
     if (!attempt) {
+      this.logger.warn({
+        event: 'payhere.notify.unknown_reference',
+        receivedAt,
+        merchantReference: parsed.merchantReference,
+        signatureValid: true,
+        outcome: 'unknown_reference',
+        errorCategory: 'unknown_reference',
+      });
       throw new NotFoundException('Payment attempt not found');
     }
-    await this.recordPayHereNotification(parsed);
+    try {
+      await this.recordPayHereNotification(parsed);
 
-    if (parsed.outcome === 'pending') {
-      return { pending: true };
+      if (parsed.outcome === 'pending') {
+        this.logger.log({
+          event: 'payhere.notify.processed',
+          receivedAt,
+          attemptId: attempt.id,
+          merchantReference: parsed.merchantReference,
+          signatureValid: true,
+          outcome: 'pending',
+        });
+        return { pending: true };
+      }
+      if (parsed.outcome === 'chargedback') {
+        await this.flagChargebackForReview(parsed.merchantReference);
+        this.logger.log({
+          event: 'payhere.notify.processed',
+          receivedAt,
+          attemptId: attempt.id,
+          merchantReference: parsed.merchantReference,
+          signatureValid: true,
+          outcome: 'chargedback',
+        });
+        return { chargedback: true };
+      }
+      const result = await this.finalizeVerified({
+        merchantReference: parsed.merchantReference,
+        providerPaymentId:
+          parsed.providerPaymentId || `payhere_${parsed.merchantReference}`,
+        amount: parsed.amount,
+        currency: parsed.currency,
+        success: parsed.success,
+        outcome: parsed.outcome,
+        raw: parsed.sanitized,
+      });
+      const duplicate =
+        result != null &&
+        typeof result === 'object' &&
+        ('alreadyPaid' in result || 'alreadyRecorded' in result);
+      this.logger.log({
+        event: duplicate
+          ? 'payhere.notify.duplicate'
+          : 'payhere.notify.processed',
+        receivedAt,
+        attemptId: attempt.id,
+        merchantReference: parsed.merchantReference,
+        signatureValid: true,
+        outcome: duplicate
+          ? 'duplicate'
+          : parsed.success
+            ? 'success'
+            : (parsed.outcome ?? 'failed'),
+      });
+      return result;
+    } catch (error) {
+      if (
+        error instanceof BadRequestException ||
+        error instanceof NotFoundException ||
+        error instanceof ConflictException ||
+        error instanceof ForbiddenException
+      ) {
+        throw error;
+      }
+      this.logger.error({
+        event: 'payhere.notify.exception',
+        receivedAt,
+        attemptId: attempt.id,
+        merchantReference: parsed.merchantReference,
+        signatureValid: true,
+        outcome: 'exception',
+        errorCategory: payHereErrorCategory(error),
+        errorName: payHereErrorName(error),
+      });
+      throw error;
     }
-    if (parsed.outcome === 'chargedback') {
-      await this.flagChargebackForReview(parsed.merchantReference);
-      return { chargedback: true };
-    }
-    return this.finalizeVerified({
-      merchantReference: parsed.merchantReference,
-      providerPaymentId:
-        parsed.providerPaymentId || `payhere_${parsed.merchantReference}`,
-      amount: parsed.amount,
-      currency: parsed.currency,
-      success: parsed.success,
-      outcome: parsed.outcome,
-      raw: parsed.sanitized,
-    });
   }
 
   /**
