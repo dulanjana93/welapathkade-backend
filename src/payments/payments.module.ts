@@ -14,6 +14,7 @@ import {
   PayHereFileLogSink,
   resolvePayHereLogPath,
 } from './payhere/payhere-file-log.sink';
+import { createPayHereIpv4Fetch } from './payhere/payhere-ipv4-fetch';
 import { readPayHereSettings } from './payhere/payhere.settings';
 import { PAYHERE_MERCHANT, PayHereRefundService } from './payhere-refund.service';
 import { PAYMENT_GATEWAY, type PaymentGateway } from './payment-gateway';
@@ -108,7 +109,8 @@ export function selectPaymentGateway(
         if (mode !== 'sandbox' && mode !== 'live') return null;
         return new PayHereGateway(
           readPayHereSettings(config),
-          globalThis.fetch,
+          // PayHere rejects this server's IPv6 source address; see the module.
+          createPayHereIpv4Fetch(),
           createPayHereDiagnosticLogger(PayHereGateway.name, {
             fileSink: fileLog,
           }),

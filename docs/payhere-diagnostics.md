@@ -118,6 +118,28 @@ Find them:
 grep '"upstreamError"' /var/log/welapathkade/payhere.log | tail -n 20
 ```
 
+## Network: PayHere calls use IPv4 only
+
+PayHere checks the caller's source address against the API key's Allowed
+Domains. `api.welapathkade.lk` has only an IPv4 (A) record, but the droplet
+also has a public IPv6 address and `sandbox.payhere.lk` publishes IPv6
+records. Node's default lookup picked IPv6, so every Merchant API call
+(charge, retrieval) failed with HTTP 401 `"Access denied for the domain"`.
+The same retrieval over IPv4 returned HTTP 200 (verified 2026-11-07).
+
+The gateway therefore uses `createPayHereIpv4Fetch()`
+(`src/payments/payhere/payhere-ipv4-fetch.ts`), which resolves IPv4
+addresses only and never falls back to IPv6. Do not switch the gateway back
+to global `fetch` unless the domain also gets an AAAA record that PayHere
+accepts.
+
+If `"Access denied for the domain"` reappears, check from the server:
+
+```bash
+curl -4 -s https://ifconfig.me; echo   # must be the A record of api.welapathkade.lk
+getent ahosts api.welapathkade.lk
+```
+
 ## logrotate
 
 Install `/etc/logrotate.d/welapathkade-payhere`:
