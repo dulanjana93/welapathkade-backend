@@ -602,7 +602,7 @@ Conversion rule for slot calculation:
 1. Resolve Asia/Colombo calendar date + weekday.
 2. Apply exceptions for that date.
 3. Convert each local HH:mm window to UTC via luxon (`Asia/Colombo` → UTC).
-4. Apply min lead time (1 hour) and max horizon (30 days) in absolute time.
+4. Apply min lead time (proposal: 5 minutes; public booking slots: 10 minutes) and max horizon (30 days) in absolute time.
 5. Subtract occupied intervals after expanding them by the 10-minute scheduling buffer.
 
 Appointment comparisons must use absolute timestamps.

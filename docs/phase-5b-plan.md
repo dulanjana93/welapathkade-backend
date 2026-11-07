@@ -94,7 +94,7 @@ Astrologer (`AstrologerConsultationsController`, JWT + `ASTROLOGER`):
 ### 1.5 Availability + occupancy (implemented)
 
 - `AvailabilityCalculator.enumerateSlots` accepts injectable `OccupiedInterval[]` and expands occupied ranges by `APPOINTMENT_BUFFER_MINUTES` (10).
-- Constants (`availability.constants.ts`): timezone `Asia/Colombo`, lead 60 minutes, horizon 30 days, duration 15–240, slot grain 30 minutes.
+- Constants (`availability.constants.ts`): timezone `Asia/Colombo`, proposal lead 5 minutes, public booking-slot lead 10 minutes, horizon 30 days, duration 15–240, slot grain 30 minutes.
 - `AvailabilityService.assertProposedSlotEligible` validates a proposed start+duration against weekly/exceptions/lead/horizon/occupied. Does **not** reserve.
 - `AvailabilityService.getPublicSlots` currently passes `occupied: []` with comment *“Phase 5+ injects appointments/reservations”*. **Public slot lists do not hide accepted-proposal times.**
 - `ConsultationProposalsService.loadBlockingIntervals` treats **other consultations’ `ACCEPTED` proposals** as soft occupancy **only when creating a new proposal**. It does **not** create reservation rows.

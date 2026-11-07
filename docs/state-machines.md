@@ -102,7 +102,8 @@ Rules:
 
 Scheduling validation (reuse AvailabilityService / AvailabilityCalculator):
 
-- At least 1 hour lead time from now.
+- Proposal minimum lead time: 5 minutes from now.
+- Public booking-slot minimum lead time: 10 minutes from now.
 - At most 30 days into the future.
 - Start and end must fit inside the same valid availability interval.
 - Respect weekly windows (Asia/Colombo clock) and exceptions.

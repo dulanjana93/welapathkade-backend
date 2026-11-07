@@ -51,14 +51,15 @@ export function resolveProposalMinLeadMinutes(
 
 /**
  * Public bookable-slot lead minutes. Defaults to
- * {@link MIN_BOOKING_LEAD_MINUTES}; reduced only under the explicit
- * non-production short-notice test override.
+ * {@link MIN_BOOKING_LEAD_MINUTES}; may be reduced under the explicit
+ * non-production short-notice test override, never increased.
  */
 export function resolveBookingMinLeadMinutes(
   rawFlag: string | undefined,
   nodeEnv: string | undefined,
 ): number {
-  return isShortNoticeTestAppointmentsEnabled(rawFlag, nodeEnv)
-    ? SHORT_NOTICE_TEST_LEAD_MINUTES
-    : MIN_BOOKING_LEAD_MINUTES;
+  if (!isShortNoticeTestAppointmentsEnabled(rawFlag, nodeEnv)) {
+    return MIN_BOOKING_LEAD_MINUTES;
+  }
+  return Math.min(SHORT_NOTICE_TEST_LEAD_MINUTES, MIN_BOOKING_LEAD_MINUTES);
 }

@@ -378,7 +378,8 @@ optional custom available periods
 
 Booking rules:
 
-Minimum lead time = 1 hour
+Proposal minimum lead time = 5 minutes
+Public booking-slot minimum lead time = 10 minutes
 Maximum booking horizon = 30 days
 Default scheduling interval = 30 minutes
 Buffer = 10 minutes

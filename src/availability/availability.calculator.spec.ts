@@ -112,19 +112,89 @@ describe('AvailabilityCalculator', () => {
     expect(windows[0].endAt.toISOString()).toBe('2026-09-21T18:00:00.000Z');
   });
 
-  it('enforces minimum 1-hour lead time', () => {
+  it('accepts a public window that starts exactly 10 minutes ahead', () => {
     // Monday 09:00–12:00 Colombo = 03:30–06:30 UTC
-    // now = 03:00 UTC → lead cutoff 04:00 UTC → clamp start
+    // now = 03:20 UTC → lead cutoff 03:30 UTC → start equals cutoff (accepted)
     const windows = calculator.buildUtcWindows({
       fromDateIso: '2026-09-21',
       toDateIso: '2026-09-21',
       weekly: [weekly(DayOfWeek.MONDAY, '09:00', '12:00')],
       exceptions: [],
-      now: new Date('2026-09-21T03:00:00.000Z'),
+      now: new Date('2026-09-21T03:20:00.000Z'),
     });
     expect(windows).toHaveLength(1);
-    expect(windows[0].startAt.toISOString()).toBe('2026-09-21T04:00:00.000Z');
+    expect(windows[0].startAt.toISOString()).toBe('2026-09-21T03:30:00.000Z');
     expect(windows[0].endAt.toISOString()).toBe('2026-09-21T06:30:00.000Z');
+  });
+
+  it('clamps a public window that would start 9 minutes ahead to the 10-minute lead', () => {
+    // Window start 03:30; now 03:21 → lead cutoff 03:31 → clamp to 03:31
+    const windows = calculator.buildUtcWindows({
+      fromDateIso: '2026-09-21',
+      toDateIso: '2026-09-21',
+      weekly: [weekly(DayOfWeek.MONDAY, '09:00', '12:00')],
+      exceptions: [],
+      now: new Date('2026-09-21T03:21:00.000Z'),
+    });
+    expect(windows).toHaveLength(1);
+    expect(windows[0].startAt.toISOString()).toBe('2026-09-21T03:31:00.000Z');
+    expect(windows[0].endAt.toISOString()).toBe('2026-09-21T06:30:00.000Z');
+  });
+
+  it('does not clamp a public window 60 minutes ahead of now', () => {
+    // now = 02:30 UTC → lead cutoff 02:40; window starts 03:30 (unchanged)
+    const windows = calculator.buildUtcWindows({
+      fromDateIso: '2026-09-21',
+      toDateIso: '2026-09-21',
+      weekly: [weekly(DayOfWeek.MONDAY, '09:00', '12:00')],
+      exceptions: [],
+      now: new Date('2026-09-21T02:30:00.000Z'),
+    });
+    expect(windows).toHaveLength(1);
+    expect(windows[0].startAt.toISOString()).toBe('2026-09-21T03:30:00.000Z');
+  });
+
+  it('enumerates a public slot that starts exactly at the 10-minute lead cutoff', () => {
+    const now = new Date('2026-09-21T03:20:00.000Z');
+    const slots = calculator.enumerateSlots({
+      fromDateIso: '2026-09-21',
+      toDateIso: '2026-09-21',
+      durationMinutes: 15,
+      weekly: [weekly(DayOfWeek.MONDAY, '09:00', '12:00')],
+      exceptions: [],
+      now,
+      intervalMinutes: 15,
+    });
+    expect(slots[0]?.startAt.toISOString()).toBe('2026-09-21T03:30:00.000Z');
+    expect(
+      slots.every(
+        (s) => s.startAt.getTime() >= now.getTime() + 10 * 60_000,
+      ),
+    ).toBe(true);
+  });
+
+  it('does not enumerate public slots that would start before the 10-minute lead', () => {
+    const now = new Date('2026-09-21T03:21:00.000Z');
+    const slots = calculator.enumerateSlots({
+      fromDateIso: '2026-09-21',
+      toDateIso: '2026-09-21',
+      durationMinutes: 15,
+      weekly: [weekly(DayOfWeek.MONDAY, '09:00', '12:00')],
+      exceptions: [],
+      now,
+      intervalMinutes: 1,
+    });
+    expect(slots.length).toBeGreaterThan(0);
+    expect(
+      slots.every(
+        (s) => s.startAt.getTime() >= now.getTime() + 10 * 60_000,
+      ),
+    ).toBe(true);
+    expect(
+      slots.some(
+        (s) => s.startAt.getTime() === now.getTime() + 9 * 60_000,
+      ),
+    ).toBe(false);
   });
 
   it('enforces maximum 30-day horizon', () => {

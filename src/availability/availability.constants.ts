@@ -2,7 +2,7 @@
 export const BUSINESS_TIMEZONE = 'Asia/Colombo';
 
 /** Minimum lead time before a public bookable slot may start. */
-export const MIN_BOOKING_LEAD_MINUTES = 60;
+export const MIN_BOOKING_LEAD_MINUTES = 10;
 
 /**
  * Minimum lead time before an astrologer-proposed consultation may start.

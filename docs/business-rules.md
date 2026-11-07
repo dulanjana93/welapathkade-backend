@@ -313,7 +313,8 @@ Date exceptions use Asia/Colombo calendar dates and override the weekly schedule
 
 Minimum lead time:
 
-1 hour
+- Proposal minimum: 5 minutes
+- Public booking-slot minimum: 10 minutes
 
 Maximum booking horizon:
 
