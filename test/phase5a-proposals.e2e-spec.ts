@@ -577,7 +577,7 @@ describe('Phase 5A Consultation Proposals (e2e)', () => {
       customerPhone: '+94775551006',
     });
 
-    // Must stay below SHORT_NOTICE_TEST_LEAD_MINUTES (5) and the default 60.
+    // Must stay below MIN_PROPOSAL_LEAD_MINUTES (5).
     await request(app.getHttpServer())
       .post(`/astrologers/me/consultations/${ctx.consultationId}/proposals`)
       .set('Authorization', `Bearer ${ctx.astro.token}`)

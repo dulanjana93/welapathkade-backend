@@ -151,34 +151,7 @@ describe('AvailabilityService.assertProposedSlotEligible', () => {
     ).rejects.toThrow(/conflicts/);
   });
 
-  it('3. rejects less than 1h lead with a specific message', async () => {
-    const soon = DateTime.now()
-      .setZone(BUSINESS_TIMEZONE)
-      .plus({ minutes: 30 });
-    prisma.weeklyAvailability.findMany.mockResolvedValue([
-      {
-        id: 'w1',
-        astrologerId: 'ap-1',
-        dayOfWeek: calculator.dayOfWeekForDate(soon.toISODate()!),
-        startTime: '00:00',
-        endTime: '23:59',
-      },
-    ]);
-    await expect(
-      service.assertProposedSlotEligible({
-        astrologerId: 'ap-1',
-        proposedStartAt: soon.toUTC().toJSDate(),
-        durationMinutes: 30,
-      }),
-    ).rejects.toThrow(/at least 60 minutes from now/);
-  });
-
-  it('short-notice override: permits a start 5 minutes ahead in development', async () => {
-    configState.allowShortNotice = 'true';
-    configState.nodeEnv = 'development';
-    const now = DateTime.fromISO('2026-10-11T13:55:00', {
-      zone: BUSINESS_TIMEZONE,
-    });
+  function sundayWindow() {
     prisma.weeklyAvailability.findMany.mockResolvedValue([
       {
         id: 'w1',
@@ -188,6 +161,13 @@ describe('AvailabilityService.assertProposedSlotEligible', () => {
         endTime: '17:00',
       },
     ]);
+  }
+
+  it('accepts a proposal exactly 5 minutes ahead', async () => {
+    const now = DateTime.fromISO('2026-10-11T13:55:00', {
+      zone: BUSINESS_TIMEZONE,
+    });
+    sundayWindow();
     await expect(
       service.assertProposedSlotEligible({
         astrologerId: 'ap-1',
@@ -198,21 +178,11 @@ describe('AvailabilityService.assertProposedSlotEligible', () => {
     ).resolves.toBeUndefined();
   });
 
-  it('short-notice override disabled: still requires 60 minutes in development', async () => {
-    configState.allowShortNotice = 'false';
-    configState.nodeEnv = 'development';
-    const now = DateTime.fromISO('2026-10-11T13:55:00', {
+  it('rejects a proposal 4 minutes ahead', async () => {
+    const now = DateTime.fromISO('2026-10-11T13:56:00', {
       zone: BUSINESS_TIMEZONE,
     });
-    prisma.weeklyAvailability.findMany.mockResolvedValue([
-      {
-        id: 'w1',
-        astrologerId: 'ap-1',
-        dayOfWeek: DayOfWeek.SUNDAY,
-        startTime: '09:00',
-        endTime: '17:00',
-      },
-    ]);
+    sundayWindow();
     await expect(
       service.assertProposedSlotEligible({
         astrologerId: 'ap-1',
@@ -220,93 +190,14 @@ describe('AvailabilityService.assertProposedSlotEligible', () => {
         durationMinutes: 15,
         now: now.toUTC().toJSDate(),
       }),
-    ).rejects.toThrow(/at least 60 minutes from now/);
+    ).rejects.toThrow(/at least 5 minutes from now/);
   });
 
-  it('short-notice override ignored when NODE_ENV is production-like at runtime', async () => {
-    configState.allowShortNotice = 'true';
-    configState.nodeEnv = 'production';
-    const now = DateTime.fromISO('2026-10-11T13:55:00', {
-      zone: BUSINESS_TIMEZONE,
-    });
-    prisma.weeklyAvailability.findMany.mockResolvedValue([
-      {
-        id: 'w1',
-        astrologerId: 'ap-1',
-        dayOfWeek: DayOfWeek.SUNDAY,
-        startTime: '09:00',
-        endTime: '17:00',
-      },
-    ]);
-    await expect(
-      service.assertProposedSlotEligible({
-        astrologerId: 'ap-1',
-        proposedStartAt: localColomboToUtc('2026-10-11', '14:00'),
-        durationMinutes: 15,
-        now: now.toUTC().toJSDate(),
-      }),
-    ).rejects.toThrow(/at least 60 minutes from now/);
-  });
-
-  it('accepts a same-day custom start more than 60 minutes ahead', async () => {
-    const now = DateTime.fromISO('2026-10-11T13:41:00', {
-      zone: BUSINESS_TIMEZONE,
-    });
-    prisma.weeklyAvailability.findMany.mockResolvedValue([
-      {
-        id: 'w1',
-        astrologerId: 'ap-1',
-        dayOfWeek: DayOfWeek.SUNDAY,
-        startTime: '09:00',
-        endTime: '17:00',
-      },
-    ]);
-    await expect(
-      service.assertProposedSlotEligible({
-        astrologerId: 'ap-1',
-        proposedStartAt: localColomboToUtc('2026-10-11', '14:45'),
-        durationMinutes: 15,
-        now: now.toUTC().toJSDate(),
-      }),
-    ).resolves.toBeUndefined();
-  });
-
-  it('rejects the reproduction case: same-day 13:45 when now is 13:41', async () => {
-    const now = DateTime.fromISO('2026-10-11T13:41:00', {
-      zone: BUSINESS_TIMEZONE,
-    });
-    prisma.weeklyAvailability.findMany.mockResolvedValue([
-      {
-        id: 'w1',
-        astrologerId: 'ap-1',
-        dayOfWeek: DayOfWeek.SUNDAY,
-        startTime: '09:00',
-        endTime: '17:00',
-      },
-    ]);
-    await expect(
-      service.assertProposedSlotEligible({
-        astrologerId: 'ap-1',
-        proposedStartAt: localColomboToUtc('2026-10-11', '13:45'),
-        durationMinutes: 15,
-        now: now.toUTC().toJSDate(),
-      }),
-    ).rejects.toThrow(/at least 60 minutes from now/);
-  });
-
-  it('rejects a past start time with a specific message', async () => {
+  it('rejects a proposal in the past', async () => {
     const now = DateTime.fromISO('2026-10-11T14:00:00', {
       zone: BUSINESS_TIMEZONE,
     });
-    prisma.weeklyAvailability.findMany.mockResolvedValue([
-      {
-        id: 'w1',
-        astrologerId: 'ap-1',
-        dayOfWeek: DayOfWeek.SUNDAY,
-        startTime: '09:00',
-        endTime: '17:00',
-      },
-    ]);
+    sundayWindow();
     await expect(
       service.assertProposedSlotEligible({
         astrologerId: 'ap-1',
@@ -315,6 +206,86 @@ describe('AvailabilityService.assertProposedSlotEligible', () => {
         now: now.toUTC().toJSDate(),
       }),
     ).rejects.toThrow(/in the past/);
+  });
+
+  it('accepts a proposal 60 minutes ahead', async () => {
+    const now = DateTime.fromISO('2026-10-11T13:00:00', {
+      zone: BUSINESS_TIMEZONE,
+    });
+    sundayWindow();
+    await expect(
+      service.assertProposedSlotEligible({
+        astrologerId: 'ap-1',
+        proposedStartAt: localColomboToUtc('2026-10-11', '14:00'),
+        durationMinutes: 15,
+        now: now.toUTC().toJSDate(),
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('proposal lead stays 5 minutes when short-notice override is disabled', async () => {
+    configState.allowShortNotice = 'false';
+    configState.nodeEnv = 'development';
+    const now = DateTime.fromISO('2026-10-11T13:55:00', {
+      zone: BUSINESS_TIMEZONE,
+    });
+    sundayWindow();
+    await expect(
+      service.assertProposedSlotEligible({
+        astrologerId: 'ap-1',
+        proposedStartAt: localColomboToUtc('2026-10-11', '14:00'),
+        durationMinutes: 15,
+        now: now.toUTC().toJSDate(),
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('proposal lead stays 5 minutes in production (flag ignored for proposals)', async () => {
+    configState.allowShortNotice = 'true';
+    configState.nodeEnv = 'production';
+    const now = DateTime.fromISO('2026-10-11T13:55:00', {
+      zone: BUSINESS_TIMEZONE,
+    });
+    sundayWindow();
+    await expect(
+      service.assertProposedSlotEligible({
+        astrologerId: 'ap-1',
+        proposedStartAt: localColomboToUtc('2026-10-11', '14:00'),
+        durationMinutes: 15,
+        now: now.toUTC().toJSDate(),
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects the former reproduction case only when under 5 minutes (13:45 vs 13:41)', async () => {
+    const now = DateTime.fromISO('2026-10-11T13:41:00', {
+      zone: BUSINESS_TIMEZONE,
+    });
+    sundayWindow();
+    // 4 minutes ahead — still rejected under the 5-minute rule
+    await expect(
+      service.assertProposedSlotEligible({
+        astrologerId: 'ap-1',
+        proposedStartAt: localColomboToUtc('2026-10-11', '13:45'),
+        durationMinutes: 15,
+        now: now.toUTC().toJSDate(),
+      }),
+    ).rejects.toThrow(/at least 5 minutes from now/);
+  });
+
+  it('accepts a same-day custom start more than 5 minutes ahead', async () => {
+    const now = DateTime.fromISO('2026-10-11T13:41:00', {
+      zone: BUSINESS_TIMEZONE,
+    });
+    sundayWindow();
+    await expect(
+      service.assertProposedSlotEligible({
+        astrologerId: 'ap-1',
+        proposedStartAt: localColomboToUtc('2026-10-11', '14:45'),
+        durationMinutes: 15,
+        now: now.toUTC().toJSDate(),
+      }),
+    ).resolves.toBeUndefined();
   });
 
   it('4. rejects beyond 30-day horizon', async () => {

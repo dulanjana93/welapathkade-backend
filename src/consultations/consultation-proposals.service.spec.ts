@@ -185,7 +185,7 @@ describe('ConsultationProposalsService', () => {
 
   it('3–8. surfaces lead/horizon/weekly/boundary/exception/duration failures from availability', async () => {
     for (const message of [
-      'Appointment must start at least 60 minutes from now',
+      'Appointment must start at least 5 minutes from now',
       'Proposed start time is in the past',
       'Proposed date is beyond the 30-day booking horizon',
       'Proposed time is outside the astrologer availability for that day',

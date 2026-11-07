@@ -1,7 +1,13 @@
-import { MIN_BOOKING_LEAD_MINUTES } from '../availability/availability.constants';
+import {
+  MIN_BOOKING_LEAD_MINUTES,
+  MIN_PROPOSAL_LEAD_MINUTES,
+} from '../availability/availability.constants';
 import { isNonProductionEnv } from './runtime-safety';
 
-/** Lead time used only when the explicit short-notice test override is active. */
+/**
+ * Lead time used only when the explicit short-notice test override is active
+ * for public bookable-slot enumeration (not proposal validation).
+ */
 export const SHORT_NOTICE_TEST_LEAD_MINUTES = 5;
 
 /**
@@ -31,8 +37,24 @@ export function assertShortNoticeTestAppointmentsEnv(
   );
 }
 
-/** Effective proposal / booking lead minutes for the current process. */
+/**
+ * Astrologer proposal / acceptance / Confirm & Pay lead minutes.
+ * Always {@link MIN_PROPOSAL_LEAD_MINUTES}; the short-notice flag does not
+ * change proposal validation (production and non-production alike).
+ */
 export function resolveProposalMinLeadMinutes(
+  _rawFlag?: string | undefined,
+  _nodeEnv?: string | undefined,
+): number {
+  return MIN_PROPOSAL_LEAD_MINUTES;
+}
+
+/**
+ * Public bookable-slot lead minutes. Defaults to
+ * {@link MIN_BOOKING_LEAD_MINUTES}; reduced only under the explicit
+ * non-production short-notice test override.
+ */
+export function resolveBookingMinLeadMinutes(
   rawFlag: string | undefined,
   nodeEnv: string | undefined,
 ): number {

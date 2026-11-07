@@ -1,8 +1,14 @@
 /** Business timezone — always Asia/Colombo for V1. */
 export const BUSINESS_TIMEZONE = 'Asia/Colombo';
 
-/** Minimum lead time before a bookable slot may start. */
+/** Minimum lead time before a public bookable slot may start. */
 export const MIN_BOOKING_LEAD_MINUTES = 60;
+
+/**
+ * Minimum lead time before an astrologer-proposed consultation may start.
+ * Enforced by assertProposedSlotEligible (create / accept / Confirm & Pay).
+ */
+export const MIN_PROPOSAL_LEAD_MINUTES = 5;
 
 /** Maximum days ahead customers may book. */
 export const MAX_BOOKING_HORIZON_DAYS = 30;

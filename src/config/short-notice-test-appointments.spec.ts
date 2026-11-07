@@ -1,8 +1,12 @@
 import 'reflect-metadata';
-import { MIN_BOOKING_LEAD_MINUTES } from '../availability/availability.constants';
+import {
+  MIN_BOOKING_LEAD_MINUTES,
+  MIN_PROPOSAL_LEAD_MINUTES,
+} from '../availability/availability.constants';
 import {
   assertShortNoticeTestAppointmentsEnv,
   isShortNoticeTestAppointmentsEnabled,
+  resolveBookingMinLeadMinutes,
   resolveProposalMinLeadMinutes,
   SHORT_NOTICE_TEST_LEAD_MINUTES,
 } from './short-notice-test-appointments';
@@ -46,8 +50,24 @@ const baseEnv = {
 };
 
 describe('short-notice test appointment override', () => {
-  it('defaults to the normal 60-minute lead when the flag is unset', () => {
+  it('proposal lead is always 5 minutes regardless of the short-notice flag', () => {
     expect(resolveProposalMinLeadMinutes(undefined, 'development')).toBe(
+      MIN_PROPOSAL_LEAD_MINUTES,
+    );
+    expect(resolveProposalMinLeadMinutes('false', 'development')).toBe(
+      MIN_PROPOSAL_LEAD_MINUTES,
+    );
+    expect(resolveProposalMinLeadMinutes('true', 'development')).toBe(
+      MIN_PROPOSAL_LEAD_MINUTES,
+    );
+    expect(resolveProposalMinLeadMinutes('true', 'production')).toBe(
+      MIN_PROPOSAL_LEAD_MINUTES,
+    );
+    expect(MIN_PROPOSAL_LEAD_MINUTES).toBe(5);
+  });
+
+  it('defaults public booking lead to 60 minutes when the flag is unset', () => {
+    expect(resolveBookingMinLeadMinutes(undefined, 'development')).toBe(
       MIN_BOOKING_LEAD_MINUTES,
     );
     expect(isShortNoticeTestAppointmentsEnabled(undefined, 'development')).toBe(
@@ -56,25 +76,25 @@ describe('short-notice test appointment override', () => {
   });
 
   it.each(['development', 'test'])(
-    'reduces lead to 5 minutes when enabled in %s',
+    'reduces public booking lead to 5 minutes when enabled in %s',
     (env) => {
-      expect(resolveProposalMinLeadMinutes('true', env)).toBe(
+      expect(resolveBookingMinLeadMinutes('true', env)).toBe(
         SHORT_NOTICE_TEST_LEAD_MINUTES,
       );
       expect(isShortNoticeTestAppointmentsEnabled('true', env)).toBe(true);
     },
   );
 
-  it('keeps 60 minutes when the flag is false in development', () => {
-    expect(resolveProposalMinLeadMinutes('false', 'development')).toBe(
+  it('keeps 60-minute public booking lead when the flag is false in development', () => {
+    expect(resolveBookingMinLeadMinutes('false', 'development')).toBe(
       MIN_BOOKING_LEAD_MINUTES,
     );
   });
 
-  it('fail-closed: never enables the override outside development/test', () => {
+  it('fail-closed: never enables the booking override outside development/test', () => {
     for (const env of ['production', undefined, 'staging', '']) {
       expect(isShortNoticeTestAppointmentsEnabled('true', env)).toBe(false);
-      expect(resolveProposalMinLeadMinutes('true', env)).toBe(
+      expect(resolveBookingMinLeadMinutes('true', env)).toBe(
         MIN_BOOKING_LEAD_MINUTES,
       );
     }

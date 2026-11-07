@@ -17,6 +17,7 @@ import {
 } from '@prisma/client';
 import {
   isShortNoticeTestAppointmentsEnabled,
+  resolveBookingMinLeadMinutes,
   resolveProposalMinLeadMinutes,
 } from '../config/short-notice-test-appointments';
 import { PrismaService } from '../prisma/prisma.service';
@@ -70,9 +71,20 @@ export class AvailabilityService {
     private readonly config: ConfigService,
   ) {}
 
-  /** Effective proposal lead; 5 minutes only under the explicit test override. */
+  /** Astrologer proposal lead (always {@link MIN_PROPOSAL_LEAD_MINUTES}). */
   private effectiveProposalMinLeadMinutes(): number {
     return resolveProposalMinLeadMinutes(
+      this.config.get<string>('app.allowShortNoticeTestAppointments'),
+      this.config.get<string>('app.nodeEnv'),
+    );
+  }
+
+  /**
+   * Public bookable-slot lead; reduced only under the short-notice test
+   * override. Independent of proposal validation.
+   */
+  private effectiveBookingMinLeadMinutes(): number {
+    return resolveBookingMinLeadMinutes(
       this.config.get<string>('app.allowShortNoticeTestAppointments'),
       this.config.get<string>('app.nodeEnv'),
     );
@@ -316,7 +328,7 @@ export class AvailabilityService {
       this.occupancy.loadOccupiedIntervals({ astrologerId: profile.id }),
     ]);
 
-    const minLeadMinutes = this.effectiveProposalMinLeadMinutes();
+    const minLeadMinutes = this.effectiveBookingMinLeadMinutes();
     const shortNoticeTestAppointments =
       this.shortNoticeTestAppointmentsEnabled();
     const slots = this.calculator.enumerateSlots({
