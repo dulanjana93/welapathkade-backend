@@ -5,8 +5,11 @@ import {
   payHereDestination,
   payHereErrorCategory,
   payHereErrorName,
+  readPayHereResponseBody,
+  summarizePayHereErrorResponse,
   type PayHereLogSink,
   type PayHereRetrievalReason,
+  type PayHereUpstreamError,
 } from './payhere-diagnostics';
 import {
   PAYHERE_LIVE_CHARGE_URL,
@@ -501,6 +504,10 @@ export class PayHereGateway {
       hostname: destination.hostname,
       path: destination.path,
     });
+    const tokenSource: 'fresh' | 'cache' =
+      this.tokenCache && this.tokenCache.expiresAtMs > Date.now()
+        ? 'cache'
+        : 'fresh';
     let token: string;
     try {
       token = await this.accessToken();
@@ -545,6 +552,8 @@ export class PayHereGateway {
       throw error;
     }
     if (!response.ok) {
+      // Diagnostics only: the body is read for the log, the outcome is unchanged.
+      const body = await readPayHereResponseBody(response);
       this.logger.warn({
         event: 'payhere.retrieval.request_error',
         merchantReference: orderId,
@@ -554,6 +563,11 @@ export class PayHereGateway {
         elapsedMs: Date.now() - startedAtMs,
         errorCategory: 'retrieval_failed',
         errorName: 'Error',
+        tokenSource,
+        upstreamError: summarizePayHereErrorResponse(response, body, [
+          token,
+          ...this.secretValues(),
+        ]),
       });
       throw new Error('PayHere retrieval failed');
     }
@@ -690,6 +704,8 @@ export class PayHereGateway {
     return this.readChargeResponse(response, input.orderId, amount, {
       attemptId: options?.attemptId,
       startedAtMs,
+      tokenSource: needsToken ? 'fresh' : 'cache',
+      redact: [token, input.customerToken, ...this.secretValues()],
     });
   }
 
@@ -697,8 +713,15 @@ export class PayHereGateway {
     response: Response,
     orderId: string,
     amount: string,
-    meta: { attemptId?: string; startedAtMs: number },
+    meta: {
+      attemptId?: string;
+      startedAtMs: number;
+      tokenSource: 'fresh' | 'cache';
+      redact: string[];
+    },
   ): Promise<PayHereChargeCall> {
+    // Set only for non-2xx responses. Successful log lines are unchanged.
+    let upstreamError: PayHereUpstreamError | null = null;
     const finish = (
       result: PayHereChargeCall,
       details: {
@@ -708,7 +731,7 @@ export class PayHereGateway {
         signatureValid: boolean | null;
       },
     ): PayHereChargeCall => {
-      this.logger.log({
+      const entry = {
         event: 'payhere.charge.response_received',
         attemptId: meta.attemptId ?? null,
         merchantReference: orderId,
@@ -720,7 +743,16 @@ export class PayHereGateway {
         signatureValid: details.signatureValid,
         classification: result.kind,
         elapsedMs: Date.now() - meta.startedAtMs,
-      });
+      };
+      if (upstreamError) {
+        this.logger.warn({
+          ...entry,
+          tokenSource: meta.tokenSource,
+          upstreamError,
+        });
+      } else {
+        this.logger.log(entry);
+      }
       return result;
     };
     let json: {
@@ -728,22 +760,44 @@ export class PayHereGateway {
       data?: unknown;
       error?: unknown;
     };
-    try {
-      json = (await response.json()) as {
-        status?: unknown;
-        data?: unknown;
-        error?: unknown;
-      };
-    } catch {
-      return finish(
-        { kind: 'uncertain' },
-        {
-          topLevelStatus: null,
-          statusCode: null,
-          providerPaymentId: null,
-          signatureValid: null,
-        },
+    if (!response.ok) {
+      // Same parsed value as response.json(); the body is also summarized.
+      const body = await readPayHereResponseBody(response);
+      upstreamError = summarizePayHereErrorResponse(
+        response,
+        body,
+        meta.redact,
       );
+      if (body.format !== 'json') {
+        return finish(
+          { kind: 'uncertain' },
+          {
+            topLevelStatus: null,
+            statusCode: null,
+            providerPaymentId: null,
+            signatureValid: null,
+          },
+        );
+      }
+      json = body.json as typeof json;
+    } else {
+      try {
+        json = (await response.json()) as {
+          status?: unknown;
+          data?: unknown;
+          error?: unknown;
+        };
+      } catch {
+        return finish(
+          { kind: 'uncertain' },
+          {
+            topLevelStatus: null,
+            statusCode: null,
+            providerPaymentId: null,
+            signatureValid: null,
+          },
+        );
+      }
     }
     const data = chargeData(json.data);
     const rawPaymentId =
@@ -1041,6 +1095,17 @@ export class PayHereGateway {
     const providerStatus = matches[0].status?.trim();
     if (!providerStatus) return { kind: 'ambiguous' };
     return { kind: 'matched', providerStatus };
+  }
+
+  /** Configured secret values that diagnostics must redact if echoed back. */
+  private secretValues(): string[] {
+    return [
+      this.settings.merchantSecret,
+      this.settings.appSecret,
+      Buffer.from(`${this.settings.appId}:${this.settings.appSecret}`).toString(
+        'base64',
+      ),
+    ];
   }
 
   private reserveMerchantCall() {

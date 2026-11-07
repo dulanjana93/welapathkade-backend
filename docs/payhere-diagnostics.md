@@ -56,6 +56,68 @@ grep payhere.retrieval /var/log/welapathkade/payhere.log
 grep payhere.payment.finalized /var/log/welapathkade/payhere.log
 ```
 
+## Upstream error details (charge and retrieval)
+
+When PayHere answers `POST /merchant/v1/payment/charge` or
+`GET /merchant/v1/payment/search` with a non-2xx HTTP status, the existing
+event gains two fields:
+
+| Event | Level | Added fields |
+| --- | --- | --- |
+| `payhere.charge.response_received` | `warn` (was `log` for non-2xx) | `tokenSource`, `upstreamError` |
+| `payhere.retrieval.request_error` | `warn` | `tokenSource`, `upstreamError` |
+
+Successful (2xx) charge and retrieval lines are unchanged: same level, same
+fields, no `upstreamError`. Charge classification, payment state,
+reconciliation flags, and the generic retrieval error are also unchanged; the
+body is read only so it can be summarized.
+
+`tokenSource` is `fresh` when a new OAuth token was requested for the call and
+`cache` when a cached token was reused. The token itself is never logged.
+
+`upstreamError` is built from an explicit allowlist:
+
+| Field | Source | Notes |
+| --- | --- | --- |
+| `httpStatus` | HTTP status | |
+| `bodyFormat` | body | `json`, `non_json`, `empty`, or `unreadable` |
+| `bodyLength` | body | Character count, or `null` when not read as text |
+| `contentType` | `Content-Type` header | Sanitized, max 80 chars |
+| `bodyStatus` | JSON `status` | e.g. PayHere `-1`, or `403` in a framework error body |
+| `errorCode` | JSON `error` (string), `code`, `error_code`, or nested `error.code` | Identifier characters only, max 80 chars |
+| `errorMessage` | first of JSON `error_description`, `msg`, `message`, `error_message`, or nested `error.message` | Sanitized, max 200 chars |
+| `errorType` | JSON `type`, `error_type`, or nested `error.type` | Identifier characters only |
+| `bodyKeys` | top-level JSON key names | Names only, never values. Keys that look sensitive (token, secret, auth, card, sig, hash, email, phone, address, name, billing, …) are dropped. Max 15 |
+| `nonJsonSummary` | non-JSON body | HTML `<title>` if present, else tag-stripped text. Sanitized, max 160 chars |
+| `authChallenge` | `WWW-Authenticate` header | `scheme`, `error`, `errorDescription`, `scope`, `realm`, each sanitized |
+| `server` | `Server` header | Identifier characters only |
+| `requestId` | `X-Request-Id`, `X-Correlation-Id`, or `CF-Ray` header | First present, identifier characters only |
+
+Any field that is missing or does not fit its expected shape is `null`.
+
+### Sanitizing
+
+Every text value goes through `sanitizePayHereText`, which:
+
+- removes control characters and collapses whitespace;
+- replaces the OAuth access token, the customer token (charge only), the
+  merchant secret, the app secret, and the Basic credential if PayHere echoes
+  them back;
+- redacts `Bearer …` / `Basic …` values and `token:` / `secret=` /
+  `password` / `authorization` / `md5sig` / `hash` values;
+- redacts UUIDs, 12–19 digit card-like numbers, email addresses, and any
+  opaque run of 24+ token characters;
+- truncates to the field limit and appends `…`.
+
+The request body, request headers, and the response body are never logged.
+Values from `upstreamError` are not returned to API callers.
+
+Find them:
+
+```bash
+grep '"upstreamError"' /var/log/welapathkade/payhere.log | tail -n 20
+```
+
 ## logrotate
 
 Install `/etc/logrotate.d/welapathkade-payhere`:
