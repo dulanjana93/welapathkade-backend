@@ -54,10 +54,19 @@ describe('WithdrawalsService.cancel', () => {
         work(tx),
       ),
     };
+    const redis = {
+      incrFixedWindow: jest.fn().mockResolvedValue(1),
+      getClient: () => ({
+        incr: jest.fn(),
+        expire: jest.fn(),
+        eval: jest.fn(),
+      }),
+    };
     const service = new WithdrawalsService(
       prisma as never,
       {} as never,
       audit as never,
+      redis as never,
     );
     return { tx, audit, prisma, service };
   }

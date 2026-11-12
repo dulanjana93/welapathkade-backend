@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { WithdrawalPurpose, WithdrawalStatus } from '@prisma/client';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   IsBoolean,
   IsEnum,
@@ -173,6 +173,71 @@ export class MarkWithdrawalPaidDto {
   @IsString()
   @IsNotEmpty()
   actualTransferredAt!: string;
+}
+
+export class RevealWithdrawalDestinationDto {
+  @ApiProperty({
+    description: 'Admin account password re-entry required to reveal destination',
+  })
+  @IsString()
+  @IsNotEmpty()
+  password!: string;
+
+  @ApiProperty({
+    minLength: 3,
+    maxLength: 500,
+    description: 'Mandatory reason for revealing the frozen destination account number',
+  })
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsString()
+  @MinLength(3)
+  @MaxLength(500)
+  reason!: string;
+}
+
+/** Swagger success schema — never documents ciphertext, IV, tag, or key material. */
+export class RevealWithdrawalDestinationResponseDto {
+  @ApiProperty()
+  withdrawalId!: string;
+
+  @ApiProperty({ enum: WithdrawalStatus, example: WithdrawalStatus.APPROVED })
+  status!: WithdrawalStatus;
+
+  @ApiProperty({ enum: WithdrawalPurpose })
+  purpose!: WithdrawalPurpose;
+
+  @ApiProperty({
+    type: 'object',
+    properties: {
+      bankName: { type: 'string' },
+      accountHolderName: { type: 'string' },
+      branchName: { type: 'string' },
+      bankCode: { type: 'string', nullable: true },
+      branchCode: { type: 'string', nullable: true },
+      accountNumber: {
+        type: 'string',
+        description: 'Full account number from the frozen withdrawal snapshot',
+      },
+      accountNumberMasked: { type: 'string', example: '••••9012' },
+    },
+  })
+  destination!: {
+    bankName: string;
+    accountHolderName: string;
+    branchName: string;
+    bankCode: string | null;
+    branchCode: string | null;
+    accountNumber: string;
+    accountNumberMasked: string;
+  };
+
+  @ApiProperty({ description: 'ISO-8601 timestamp when plaintext was returned' })
+  revealedAt!: string;
+
+  @ApiProperty()
+  auditLogId!: string;
 }
 
 export class AdminWithdrawalQueryDto extends FinancePaginationQueryDto {

@@ -2,13 +2,19 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   Param,
   Post,
   Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBearerAuth,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 import { UserRole, type User } from '@prisma/client';
 import type { Request } from 'express';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -19,6 +25,8 @@ import {
   CancelWithdrawalDto,
   MarkWithdrawalPaidDto,
   RejectWithdrawalDto,
+  RevealWithdrawalDestinationDto,
+  RevealWithdrawalDestinationResponseDto,
   AdminWithdrawalQueryDto,
 } from '../withdrawals/dto/withdrawal.dto';
 import { WithdrawalsService } from '../withdrawals/withdrawals.service';
@@ -144,5 +152,26 @@ export class AdminFinanceController {
     @Req() req: Request,
   ) {
     return this.withdrawals.markPaid(admin, id, dto, req.ip);
+  }
+
+  @Post('withdrawals/:id/reveal-destination')
+  @Header('Cache-Control', 'no-store')
+  @Header('Pragma', 'no-cache')
+  @ApiOperation({
+    summary:
+      'Reveal the frozen destination account number for an APPROVED withdrawal after admin password re-entry. Does not mutate wallets, ledgers, or withdrawal status.',
+  })
+  @ApiOkResponse({
+    description:
+      'Plaintext destination from the frozen withdrawal snapshot. Encryption metadata is never returned.',
+    type: RevealWithdrawalDestinationResponseDto,
+  })
+  revealDestination(
+    @CurrentUser() admin: User,
+    @Param('id') id: string,
+    @Body() dto: RevealWithdrawalDestinationDto,
+    @Req() req: Request,
+  ) {
+    return this.withdrawals.revealDestination(admin, id, dto, req.ip);
   }
 }

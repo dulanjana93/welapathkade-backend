@@ -1,4 +1,9 @@
-import { Module } from '@nestjs/common';
+import {
+  MiddlewareConsumer,
+  Module,
+  NestModule,
+  RequestMethod,
+} from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { UsersModule } from '../users/users.module';
 import { AdminAuthController } from './admin-auth.controller';
@@ -17,6 +22,7 @@ import { WithdrawalsModule } from '../withdrawals/withdrawals.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { AdminRefundsController } from './admin-refunds.controller';
 import { AdminSavedCardChargesController } from './admin-saved-card-charges.controller';
+import { RevealDestinationNoStoreMiddleware } from './reveal-destination-no-store.middleware';
 
 @Module({
   imports: [
@@ -42,6 +48,14 @@ import { AdminSavedCardChargesController } from './admin-saved-card-charges.cont
     AdminAuthService,
     AdminFinanceService,
     AdminConsultationsService,
+    RevealDestinationNoStoreMiddleware,
   ],
 })
-export class AdminModule {}
+export class AdminModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer.apply(RevealDestinationNoStoreMiddleware).forRoutes({
+      path: 'admin/finance/withdrawals/:id/reveal-destination',
+      method: RequestMethod.POST,
+    });
+  }
+}

@@ -1,21 +1,28 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
+  HttpException,
+  HttpStatus,
   Injectable,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import {
   LedgerCategory,
   LedgerEntryKind,
   Prisma,
+  UserRole,
   WithdrawalEventAction,
   WithdrawalPurpose,
   WithdrawalStatus,
   type User,
 } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
+import { verifyPassword } from '../common/crypto/password';
 import { toMoneyString } from '../common/money/money';
 import { PrismaService } from '../prisma/prisma.service';
+import { RedisService } from '../redis/redis.service';
 import {
   hasDateBound,
   parseUtcHalfOpenRange,
@@ -31,6 +38,7 @@ import type {
   CreateWithdrawalDto,
   MarkWithdrawalPaidDto,
   RejectWithdrawalDto,
+  RevealWithdrawalDestinationDto,
   UpdateBankAccountDto,
   WithdrawalListQueryDto,
 } from './dto/withdrawal.dto';
@@ -38,6 +46,13 @@ import {
   MIN_WITHDRAWAL_AMOUNT,
   RESERVED_WITHDRAWAL_STATUSES,
   WITHDRAWAL_CURRENCY,
+  WITHDRAWAL_DESTINATION_REVEALED_ACTION,
+  WITHDRAWAL_REVEAL_PASSWORD_FAIL_MAX_PER_HOUR,
+  WITHDRAWAL_REVEAL_PWD_FAIL_KEY_PREFIX,
+  WITHDRAWAL_REVEAL_RATE_LIMIT_MESSAGE,
+  WITHDRAWAL_REVEAL_SUCCESS_KEY_PREFIX,
+  WITHDRAWAL_REVEAL_SUCCESS_MAX_PER_HOUR,
+  WITHDRAWAL_REVEAL_WINDOW_SECONDS,
 } from './withdrawals.constants';
 import {
   assertWithdrawalCurrency,
@@ -97,6 +112,7 @@ export class WithdrawalsService {
     private readonly prisma: PrismaService,
     private readonly crypto: BankAccountCrypto,
     private readonly audit: AuditService,
+    private readonly redisService: RedisService,
   ) {}
 
   async createBankAccount(user: User, dto: CreateBankAccountDto) {
@@ -483,6 +499,133 @@ export class WithdrawalsService {
         reason: event.reason,
         createdAt: event.createdAt.toISOString(),
       })),
+    };
+  }
+
+  /**
+   * Controlled reveal of the immutable withdrawal destination snapshot.
+   * Decrypts WithdrawalRequest destination ciphertext only — never the live
+   * AstrologerBankAccount row. Does not mutate withdrawal, wallet, or ledger.
+   *
+   * Rate limits (fixed 1h windows, atomic Redis Lua INCR+EXPIRE):
+   * - Failed password attempts: per adminId + IP (does not consume reveal quota).
+   * - Successful reveals: per adminId after password verifies, before decrypt.
+   */
+  async revealDestination(
+    admin: User,
+    id: string,
+    dto: RevealWithdrawalDestinationDto,
+    ip?: string | null,
+  ) {
+    // Defense in depth: controller guards already require ADMIN.
+    if (admin.role !== UserRole.ADMIN) {
+      throw new ForbiddenException('Insufficient permissions');
+    }
+
+    const actor = await this.prisma.user.findUnique({
+      where: { id: admin.id },
+      select: { id: true, role: true, passwordHash: true },
+    });
+    if (!actor || actor.role !== UserRole.ADMIN || !actor.passwordHash) {
+      await this.recordPasswordFailure(admin.id, ip);
+      throw new UnauthorizedException('Invalid password');
+    }
+
+    const passwordOk = await verifyPassword(actor.passwordHash, dto.password);
+    if (!passwordOk) {
+      await this.recordPasswordFailure(admin.id, ip);
+      throw new UnauthorizedException('Invalid password');
+    }
+
+    // Password verified — enforce successful-reveal quota before decrypt.
+    await this.consumeRevealSuccessQuota(admin.id);
+
+    const row = await this.prisma.withdrawalRequest.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        status: true,
+        purpose: true,
+        destinationBankName: true,
+        destinationAccountHolderName: true,
+        destinationBranchName: true,
+        destinationBankCode: true,
+        destinationBranchCode: true,
+        destinationAccountLast4: true,
+        destinationAccountCiphertext: true,
+        destinationAccountIv: true,
+        destinationAccountTag: true,
+      },
+    });
+    if (!row) {
+      throw new NotFoundException('WITHDRAWAL_NOT_FOUND');
+    }
+    if (row.status !== WithdrawalStatus.APPROVED) {
+      throw new BadRequestException('WITHDRAWAL_REVEAL_NOT_ALLOWED');
+    }
+
+    const ciphertext = row.destinationAccountCiphertext?.trim() ?? '';
+    const iv = row.destinationAccountIv?.trim() ?? '';
+    const tag = row.destinationAccountTag?.trim() ?? '';
+    const last4 = row.destinationAccountLast4?.trim() ?? '';
+    if (!ciphertext || !iv || !tag || !/^\d{4}$/.test(last4)) {
+      throw new BadRequestException('WITHDRAWAL_DESTINATION_SNAPSHOT_INVALID');
+    }
+
+    let accountNumber: string;
+    try {
+      accountNumber = this.crypto.decrypt({
+        ciphertext,
+        iv,
+        tag,
+        last4,
+      });
+    } catch {
+      throw new BadRequestException('WITHDRAWAL_DESTINATION_SNAPSHOT_INVALID');
+    }
+
+    if (!accountNumber || accountNumber.slice(-4) !== last4) {
+      throw new BadRequestException('WITHDRAWAL_DESTINATION_SNAPSHOT_INVALID');
+    }
+
+    const accountNumberMasked = maskAccountNumber(last4);
+    const reason = dto.reason.trim();
+
+    // Audit must persist before plaintext leaves this method (fail closed).
+    const audit = await this.audit.record({
+      adminUserId: admin.id,
+      action: WITHDRAWAL_DESTINATION_REVEALED_ACTION,
+      entityType: 'WithdrawalRequest',
+      entityId: row.id,
+      oldData: {
+        status: row.status,
+        accountNumberMasked,
+      },
+      newData: {
+        status: row.status,
+        accountNumberMasked,
+        accountNumberLast4: last4,
+        reason,
+        purpose: row.purpose,
+      },
+      ip: ip ?? null,
+    });
+
+    return {
+      withdrawalId: row.id,
+      status: row.status,
+      purpose: row.purpose,
+      destination: {
+        bankName: row.destinationBankName,
+        accountHolderName: row.destinationAccountHolderName,
+        branchName: row.destinationBranchName,
+        bankCode: row.destinationBankCode,
+        branchCode: row.destinationBranchCode,
+        accountNumber,
+        accountNumberMasked,
+      },
+      revealedAt: new Date().toISOString(),
+      auditLogId: audit.id,
     };
   }
 
@@ -885,6 +1028,58 @@ export class WithdrawalsService {
       count: agg._count._all,
       amount: toMoneyString(agg._sum.amount ?? ZERO_MONEY),
     };
+  }
+
+  /**
+   * Record a failed password verification against the fixed-window fail counter.
+   * Keyed by admin ID + normalized IP. Exceeding the cap returns a generic 429
+   * that does not disclose whether the account or password was valid.
+   * Redis errors propagate (fail closed).
+   */
+  private async recordPasswordFailure(
+    adminUserId: string,
+    ip?: string | null,
+  ): Promise<void> {
+    const key = `${WITHDRAWAL_REVEAL_PWD_FAIL_KEY_PREFIX}${adminUserId}:${this.normalizeRevealIp(ip)}`;
+    const count = await this.redisService.incrFixedWindow(
+      key,
+      WITHDRAWAL_REVEAL_WINDOW_SECONDS,
+    );
+    if (count > WITHDRAWAL_REVEAL_PASSWORD_FAIL_MAX_PER_HOUR) {
+      throw new HttpException(
+        WITHDRAWAL_REVEAL_RATE_LIMIT_MESSAGE,
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+  }
+
+  /**
+   * Successful-reveal quota after password verification, before snapshot decrypt.
+   * Fixed one-hour window per admin ID. Does not count password failures.
+   * Redis errors propagate (fail closed).
+   */
+  private async consumeRevealSuccessQuota(adminUserId: string): Promise<void> {
+    const key = `${WITHDRAWAL_REVEAL_SUCCESS_KEY_PREFIX}${adminUserId}`;
+    const count = await this.redisService.incrFixedWindow(
+      key,
+      WITHDRAWAL_REVEAL_WINDOW_SECONDS,
+    );
+    if (count > WITHDRAWAL_REVEAL_SUCCESS_MAX_PER_HOUR) {
+      throw new HttpException(
+        WITHDRAWAL_REVEAL_RATE_LIMIT_MESSAGE,
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+  }
+
+  private normalizeRevealIp(ip?: string | null): string {
+    const raw = (ip ?? '').trim().toLowerCase();
+    if (!raw) {
+      return 'unknown';
+    }
+    // Keep key-safe characters only (IPv4/IPv6/host fragments).
+    const safe = raw.replace(/[^a-z0-9:._-]/g, '_');
+    return safe.slice(0, 128) || 'unknown';
   }
 
   private async lockWallet(tx: Tx, userId: string) {
