@@ -10,6 +10,7 @@ import { AdminFinanceService } from './admin-finance.service';
 import { AdminServicesController } from './admin-services.controller';
 import { AdminAstrologersController } from './admin-astrologers.controller';
 import { AdminUsersController } from './admin-users.controller';
+import { AdminReferralsController } from './admin-referrals.controller';
 import { AstrologersModule } from '../astrologers/astrologers.module';
 import { ServicesModule } from '../services/services.module';
 import { WithdrawalsModule } from '../withdrawals/withdrawals.module';
@@ -29,6 +30,7 @@ import { AdminSavedCardChargesController } from './admin-saved-card-charges.cont
   controllers: [
     AdminAuthController,
     AdminUsersController,
+    AdminReferralsController,
     AdminServicesController,
     AdminAstrologersController,
     AdminConsultationsController,

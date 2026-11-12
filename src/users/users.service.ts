@@ -15,6 +15,7 @@ import {
   UserStatus,
 } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
+import { maskAccountNumber } from '../withdrawals/bank-account.crypto';
 import {
   normalizeBillingInput,
   toBillingProfileView,
@@ -461,6 +462,21 @@ export class UsersService {
           include: { application: true },
         },
         referredBy: true,
+        bankAccounts: {
+          select: {
+            id: true,
+            bankName: true,
+            accountHolderName: true,
+            branchName: true,
+            bankCode: true,
+            branchCode: true,
+            accountNumberLast4: true,
+            isActive: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+          orderBy: [{ isActive: 'desc' }, { createdAt: 'desc' }],
+        },
       },
     });
     if (!user) {
@@ -477,6 +493,20 @@ export class UsersService {
             status: user.referredBy.status,
           }
         : null,
+      bankAccounts: user.bankAccounts.map((account) => ({
+        id: account.id,
+        bankName: account.bankName,
+        accountHolderName: account.accountHolderName,
+        branchName: account.branchName,
+        bankCode: account.bankCode,
+        branchCode: account.branchCode,
+        accountNumberMasked: maskAccountNumber(account.accountNumberLast4),
+        isActive: account.isActive,
+        createdAt: account.createdAt.toISOString(),
+        updatedAt: account.updatedAt.toISOString(),
+      })),
+      bankAccountsNote:
+        'Registered payout destinations for this account. Account numbers are encrypted; only a masked form is shown. Full numbers are never returned to admin.',
     };
   }
 
@@ -717,5 +747,190 @@ export class UsersService {
     if (user.status === UserStatus.INACTIVE) {
       throw new BadRequestException('Account is inactive');
     }
+  }
+
+  /**
+   * Admin referral ownership graph for PUBLIC/ASTROLOGER accounts.
+   * Does not include ADMIN accounts or financial ledger data.
+   */
+  async adminListReferralRelationships(filters: {
+    role?: UserRole;
+    attribution?: 'ALL' | 'ATTRIBUTED' | 'UNATTRIBUTED';
+  }) {
+    const roleFilter =
+      filters.role === UserRole.PUBLIC || filters.role === UserRole.ASTROLOGER
+        ? filters.role
+        : undefined;
+    const attribution = filters.attribution ?? 'ALL';
+
+    const users = await this.prisma.user.findMany({
+      where: {
+        role: roleFilter
+          ? roleFilter
+          : { in: [UserRole.PUBLIC, UserRole.ASTROLOGER] },
+        ...(attribution === 'ATTRIBUTED'
+          ? { referredByUserId: { not: null } }
+          : {}),
+        ...(attribution === 'UNATTRIBUTED'
+          ? { referredByUserId: null }
+          : {}),
+      },
+      select: {
+        id: true,
+        name: true,
+        phone: true,
+        role: true,
+        status: true,
+        referralCode: true,
+        referredByUserId: true,
+        createdAt: true,
+        referredBy: {
+          select: {
+            id: true,
+            name: true,
+            role: true,
+            status: true,
+            referralCode: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return users.map((user) => {
+      const attributed = user.referredBy != null;
+      const referralKind = attributed
+        ? user.role === UserRole.ASTROLOGER
+          ? ('ASTROLOGER' as const)
+          : ('CUSTOMER' as const)
+        : null;
+
+      return {
+        user: {
+          id: user.id,
+          name: user.name,
+          phone: user.phone,
+          role: user.role,
+          status: user.status,
+          referralCode: user.referralCode,
+          createdAt: user.createdAt.toISOString(),
+        },
+        referredBy: user.referredBy
+          ? {
+              id: user.referredBy.id,
+              name: user.referredBy.name,
+              role: user.referredBy.role,
+              status: user.referredBy.status,
+              referralCode: user.referredBy.referralCode,
+            }
+          : null,
+        referralKind,
+      };
+    });
+  }
+
+  async adminListReferralCorrections(limit = 100) {
+    const take = Math.min(Math.max(limit, 1), 100);
+    const rows = await this.prisma.referralAttributionCorrection.findMany({
+      take,
+      orderBy: { createdAt: 'desc' },
+      include: {
+        targetUser: {
+          select: {
+            id: true,
+            name: true,
+            role: true,
+            referralCode: true,
+          },
+        },
+        admin: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
+      },
+    });
+
+    const referrerIds = new Set<string>();
+    for (const row of rows) {
+      if (row.previousReferrerUserId) {
+        referrerIds.add(row.previousReferrerUserId);
+      }
+      if (row.newReferrerUserId) {
+        referrerIds.add(row.newReferrerUserId);
+      }
+    }
+
+    const referrers =
+      referrerIds.size === 0
+        ? []
+        : await this.prisma.user.findMany({
+            where: { id: { in: [...referrerIds] } },
+            select: {
+              id: true,
+              name: true,
+              role: true,
+              referralCode: true,
+            },
+          });
+    const referrerById = new Map(referrers.map((row) => [row.id, row]));
+
+    return rows.map((row) => {
+      const previous = row.previousReferrerUserId
+        ? (referrerById.get(row.previousReferrerUserId) ?? null)
+        : null;
+      const next = row.newReferrerUserId
+        ? (referrerById.get(row.newReferrerUserId) ?? null)
+        : null;
+
+      return {
+        id: row.id,
+        targetUserId: row.targetUserId,
+        targetUser: {
+          id: row.targetUser.id,
+          name: row.targetUser.name,
+          role: row.targetUser.role,
+          referralCode: row.targetUser.referralCode,
+        },
+        previousReferrerUserId: row.previousReferrerUserId,
+        previousReferrer: previous
+          ? {
+              id: previous.id,
+              name: previous.name,
+              role: previous.role,
+              referralCode: previous.referralCode,
+            }
+          : null,
+        newReferrerUserId: row.newReferrerUserId,
+        newReferrer: next
+          ? {
+              id: next.id,
+              name: next.name,
+              role: next.role,
+              referralCode: next.referralCode,
+            }
+          : null,
+        adminUserId: row.adminUserId,
+        adminName: row.admin.name,
+        reason: row.reason,
+        createdAt: row.createdAt.toISOString(),
+      };
+    });
+  }
+
+  async adminResolveReferrerCode(code: string) {
+    const trimmed = code.trim();
+    if (!trimmed) {
+      throw new BadRequestException('Referral code is required');
+    }
+    const referrer = await this.resolvePublicReferrer(trimmed);
+    return {
+      id: referrer.id,
+      name: referrer.name,
+      role: referrer.role,
+      status: referrer.status,
+      referralCode: referrer.referralCode,
+    };
   }
 }

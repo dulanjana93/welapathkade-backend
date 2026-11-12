@@ -55,7 +55,7 @@ describe('UsersService admin users', () => {
     expect(rows[0]).not.toHaveProperty('passwordHash');
   });
 
-  it('returns user detail with referredBy', async () => {
+  it('returns user detail with referredBy and masked bank accounts', async () => {
     prisma.user.findUnique.mockResolvedValue({
       ...baseUser,
       referredBy: {
@@ -64,6 +64,21 @@ describe('UsersService admin users', () => {
         role: UserRole.PUBLIC,
         status: UserStatus.ACTIVE,
       },
+      bankAccounts: [
+        {
+          id: 'ba1',
+          bankName: 'Commercial Bank',
+          accountHolderName: 'Nimal',
+          branchName: 'Kandy',
+          bankCode: '7056',
+          branchCode: '001',
+          accountNumberLast4: '9012',
+          accountNumberCiphertext: 'cipher-should-not-leak',
+          isActive: true,
+          createdAt: new Date('2026-02-01T00:00:00.000Z'),
+          updatedAt: new Date('2026-02-02T00:00:00.000Z'),
+        },
+      ],
     });
 
     const detail = await service.adminGetById('u1');
@@ -73,6 +88,22 @@ describe('UsersService admin users', () => {
       role: UserRole.PUBLIC,
       status: UserStatus.ACTIVE,
     });
+    expect(detail.bankAccounts).toEqual([
+      {
+        id: 'ba1',
+        bankName: 'Commercial Bank',
+        accountHolderName: 'Nimal',
+        branchName: 'Kandy',
+        bankCode: '7056',
+        branchCode: '001',
+        accountNumberMasked: '••••9012',
+        isActive: true,
+        createdAt: '2026-02-01T00:00:00.000Z',
+        updatedAt: '2026-02-02T00:00:00.000Z',
+      },
+    ]);
+    expect(JSON.stringify(detail)).not.toContain('cipher-should-not-leak');
+    expect(detail.bankAccountsNote).toMatch(/masked/i);
   });
 
   it('throws when user detail is missing', async () => {
