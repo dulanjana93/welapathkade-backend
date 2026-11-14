@@ -51,6 +51,11 @@ Useful filters:
 
 ```bash
 grep payhere.preapproval.notify /var/log/welapathkade/payhere.log
+# Verified PayHere success for a registration that was already FAILED.
+# Cancel that pre-approval manually in the PayHere merchant portal.
+grep payhere.preapproval.notify.late_authorization /var/log/welapathkade/payhere.log
+# Registrations failed by complete (no verified success) or by a new start.
+grep -E 'payhere.preapproval.(completed_unconfirmed|superseded)' /var/log/welapathkade/payhere.log
 grep payhere.charge /var/log/welapathkade/payhere.log
 grep payhere.retrieval /var/log/welapathkade/payhere.log
 grep payhere.payment.finalized /var/log/welapathkade/payhere.log

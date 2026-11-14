@@ -10,6 +10,7 @@ import {
   PaymentProvider,
   Prisma,
   SavedCardConsentEventType,
+  SavedCardFailureReason,
   SavedCardStatus,
   type SavedPaymentMethod,
   type User,
@@ -56,23 +57,49 @@ export type SavedCardView = {
   removedAt: Date | null;
 };
 
-/** Customer-visible in-flight registration. No card or token fields. */
-export type PendingRegistrationView = {
-  id: string;
-  status: typeof SavedCardStatus.PENDING;
-  consentedAt: Date;
-};
+/**
+ * What the app saw when the PayHere page closed. Informational only: it can
+ * fail an attempt early (CANCELLED) but it can never activate a card.
+ */
+export const REGISTRATION_CLIENT_OUTCOMES = [
+  'RETURNED',
+  'CANCELLED',
+  'CLOSED',
+] as const;
+export type RegistrationClientOutcome =
+  (typeof REGISTRATION_CLIENT_OUTCOMES)[number];
+
+/** Customer-facing failure reason. Internal reasons map onto these. */
+export type FailedRegistrationReason =
+  'DECLINED' | 'CANCELLED' | 'NOT_CONFIRMED';
 
 /**
- * Customer-visible terminal registration failure. Shown only when PayHere
- * notify confirmed failure and no PENDING registration remains. Not a
- * chargeable payment method.
+ * Customer-visible terminal registration failure: the newest registration
+ * attempt ended without a verified PayHere success. Not a chargeable payment
+ * method and never blocks a new registration.
  */
 export type FailedRegistrationView = {
   id: string;
   status: typeof SavedCardStatus.FAILED;
+  reason: FailedRegistrationReason;
   consentedAt: Date;
+  failedAt: Date | null;
 };
+
+/** Final outcome of one registration flow. Never PENDING. */
+export type RegistrationResult = {
+  status: SavedCardStatus;
+  savedCard: SavedCardView | null;
+  failedRegistration: FailedRegistrationView | null;
+};
+
+/**
+ * Backstop only. A registration whose app never called `complete` (app killed,
+ * network lost) is failed by the expiry sweep after this many minutes. The
+ * primary path is `complete`, and a new `start` supersedes an open attempt
+ * immediately, so this window never blocks a customer.
+ */
+export const ABANDONED_REGISTRATION_MINUTES = 30;
 
 const RETIRED = {
   authorizationEnabled: false,
@@ -89,6 +116,16 @@ const RETIRED = {
 @Injectable()
 export class SavedCardService {
   private readonly logger: PayHereLogSink;
+
+  /**
+   * How long `complete` waits, inside the request, for PayHere's signed
+   * notification to land after the customer returns from the PayHere page.
+   * This is a bounded confirmation window, not a pending state: when it ends
+   * the attempt is ACTIVE or FAILED.
+   */
+  completionWait = { totalMs: 8000, intervalMs: 1000 };
+  sleep = (ms: number) =>
+    new Promise<void>((resolve) => setTimeout(resolve, ms));
 
   constructor(
     private readonly prisma: PrismaService,
@@ -123,8 +160,8 @@ export class SavedCardService {
         },
         orderBy: { createdAt: 'desc' },
       }),
-      // Newest registration attempt drives pending/failed UI. An older FAILED
-      // row must not surface after a later ACTIVE card is registered.
+      // The newest attempt decides whether a failure is still relevant. An
+      // older FAILED row must not surface after a later card or attempt.
       this.prisma.savedPaymentMethod.findFirst({
         where: {
           userId,
@@ -139,14 +176,17 @@ export class SavedCardService {
         orderBy: { createdAt: 'desc' },
       }),
     ]);
-    const pending =
-      latestAttempt?.status === SavedCardStatus.PENDING ? latestAttempt : null;
     const failed =
       latestAttempt?.status === SavedCardStatus.FAILED ? latestAttempt : null;
     return {
       consent: this.consent(),
       methods: rows.map(toView),
-      pendingRegistration: pending ? toPendingRegistration(pending) : null,
+      /**
+       * @deprecated Always null. Registration is no longer a customer-visible
+       * pending workflow. Kept so older app builds keep parsing the response
+       * and never block a new registration.
+       */
+      pendingRegistration: null,
       failedRegistration: failed ? toFailedRegistration(failed) : null,
     };
   }
@@ -164,10 +204,14 @@ export class SavedCardService {
         'PayHere saved cards require PAYHERE_MODE=sandbox or live',
       );
     }
-    const existing = await this.prisma.savedPaymentMethod.findFirst({
+    // An earlier attempt that never completed must not block the customer.
+    // Starting again supersedes it (FAILED, slot released). A late PayHere
+    // success for it is handled as a late authorization in handleNotify.
+    const open = await this.prisma.savedPaymentMethod.findFirst({
       where: { openCardSlot: user.id },
     });
-    if (existing) {
+    if (open && open.status !== SavedCardStatus.PENDING) {
+      // Only PENDING holds the slot. Anything else is a data error.
       throw new ConflictException('A card registration is already in progress');
     }
 
@@ -176,6 +220,14 @@ export class SavedCardService {
     let created: SavedPaymentMethod;
     try {
       created = await this.prisma.$transaction(async (tx) => {
+        if (open) {
+          await failPendingRegistration(
+            tx,
+            open.id,
+            SavedCardFailureReason.SUPERSEDED,
+            now,
+          );
+        }
         const row = await tx.savedPaymentMethod.create({
           data: {
             userId: user.id,
@@ -199,8 +251,18 @@ export class SavedCardService {
         return row;
       });
     } catch (error) {
+      // Only a truly concurrent start for the same customer lands here.
       if (!isUniqueConflict(error)) throw error;
       throw new ConflictException('A card registration is already in progress');
+    }
+    if (open) {
+      this.logger.log({
+        event: 'payhere.preapproval.superseded',
+        savedCardId: open.id,
+        merchantReference: open.merchantReference,
+        outcome: 'failed',
+        failureReason: SavedCardFailureReason.SUPERSEDED,
+      });
     }
 
     const form = this.payhere.createPreapproval({
@@ -220,6 +282,84 @@ export class SavedCardService {
       consentVersion: AUTOMATIC_PAYMENT_CONSENT_VERSION,
       preapproval: form,
     };
+  }
+
+  /**
+   * Ends one registration flow. The app calls this when the PayHere page
+   * closes (return URL, cancel URL, or the customer closing the WebView).
+   *
+   * The browser return is not proof of success: PayHere passes no status to
+   * return_url, and only the signed notify carries `customer_token`. So the
+   * card is ACTIVE only if handleNotify already activated it. Otherwise this
+   * waits briefly for that notify, then marks the attempt FAILED and releases
+   * openCardSlot so the customer can retry immediately. It never returns
+   * PENDING.
+   */
+  async complete(
+    userId: string,
+    id: string,
+    clientOutcome: RegistrationClientOutcome | undefined,
+  ): Promise<RegistrationResult> {
+    let row = await this.owned(userId, id);
+    if (
+      row.status === SavedCardStatus.PENDING &&
+      clientOutcome !== 'CANCELLED'
+    ) {
+      row = await this.awaitNotify(row);
+    }
+    if (row.status !== SavedCardStatus.PENDING) {
+      return toRegistrationResult(row);
+    }
+    const reason =
+      clientOutcome === 'CANCELLED'
+        ? SavedCardFailureReason.CUSTOMER_CANCELLED
+        : SavedCardFailureReason.NOT_CONFIRMED;
+    const failed = await failPendingRegistration(
+      this.prisma,
+      row.id,
+      reason,
+      new Date(),
+    );
+    if (failed) {
+      this.logger.log({
+        event: 'payhere.preapproval.completed_unconfirmed',
+        savedCardId: row.id,
+        merchantReference: row.merchantReference,
+        clientOutcome: clientOutcome ?? null,
+        outcome: 'failed',
+        failureReason: reason,
+      });
+    }
+    // If the notify won the race, this row is ACTIVE (or FAILED by PayHere).
+    return toRegistrationResult(await this.owned(userId, id));
+  }
+
+  /**
+   * Expiry-sweep backstop: fail registrations whose app never completed the
+   * flow. Status-guarded and idempotent.
+   */
+  async failAbandonedRegistrations(now: Date = new Date()) {
+    const cutoff = new Date(
+      now.getTime() - ABANDONED_REGISTRATION_MINUTES * 60_000,
+    );
+    return failStalePendingRegistrations(this.prisma, {
+      createdBefore: cutoff,
+      reason: SavedCardFailureReason.ABANDONED,
+      now,
+    });
+  }
+
+  private async awaitNotify(row: SavedPaymentMethod) {
+    const { totalMs, intervalMs } = this.completionWait;
+    let waited = 0;
+    let current = row;
+    while (current.status === SavedCardStatus.PENDING && waited < totalMs) {
+      const step = Math.max(1, Math.min(intervalMs, totalMs - waited));
+      await this.sleep(step);
+      waited += step;
+      current = await this.owned(row.userId, row.id);
+    }
+    return current;
   }
 
   async handleNotify(fields: Record<string, string>) {
@@ -275,6 +415,13 @@ export class SavedCardService {
       });
       throw new NotFoundException('Saved card registration not found');
     }
+    if (
+      row.status === SavedCardStatus.FAILED &&
+      parsed.success &&
+      parsed.customerToken
+    ) {
+      return this.recordLateAuthorization(row, parsed, receivedAt);
+    }
     if (row.status !== SavedCardStatus.PENDING) {
       this.logger.log({
         event: 'payhere.preapproval.notify.duplicate',
@@ -302,16 +449,14 @@ export class SavedCardService {
           });
           return { pending: true, savedCard: toView(row) };
         }
-        await this.prisma.$transaction((tx) =>
-          tx.savedPaymentMethod.updateMany({
-            where: { id: row.id, status: SavedCardStatus.PENDING },
-            data: {
-              status: SavedCardStatus.FAILED,
-              authorizationEnabled: false,
-              openCardSlot: null,
-              payherePaymentId: parsed.providerPaymentId || null,
-            },
-          }),
+        await failPendingRegistration(
+          this.prisma,
+          row.id,
+          parsed.statusCode === -1
+            ? SavedCardFailureReason.PAYHERE_CANCELLED
+            : SavedCardFailureReason.PAYHERE_DECLINED,
+          new Date(),
+          { payherePaymentId: parsed.providerPaymentId || null },
         );
         this.logger.log({
           event: 'payhere.preapproval.notify.failed',
@@ -357,6 +502,10 @@ export class SavedCardService {
         const current = await this.prisma.savedPaymentMethod.findUniqueOrThrow({
           where: { id: row.id },
         });
+        if (current.status === SavedCardStatus.FAILED) {
+          // `complete`, a newer start, or the sweep failed it first.
+          return this.recordLateAuthorization(current, parsed, receivedAt);
+        }
         this.logger.log({
           event: 'payhere.preapproval.notify.duplicate',
           receivedAt,
@@ -410,6 +559,51 @@ export class SavedCardService {
       });
       throw error;
     }
+  }
+
+  /**
+   * A verified PayHere success for a registration that is already FAILED.
+   * The card is never reactivated and the token is never stored, so it can
+   * never be charged. PayHere has no API to cancel a pre-approval, so the
+   * row is flagged (lateAuthorizationAt) for manual cancellation in the
+   * PayHere merchant portal. Idempotent: only the first notify sets the flag.
+   * Returns normally (HTTP 200) so PayHere stops retrying.
+   */
+  private async recordLateAuthorization(
+    row: SavedPaymentMethod,
+    parsed: ReturnType<PreapprovalClient['verifyPreapproval']>,
+    receivedAt: string,
+  ) {
+    const flagged = await this.prisma.savedPaymentMethod.updateMany({
+      where: {
+        id: row.id,
+        status: SavedCardStatus.FAILED,
+        lateAuthorizationAt: null,
+      },
+      data: {
+        lateAuthorizationAt: new Date(),
+        payherePaymentId:
+          row.payherePaymentId ?? (parsed.providerPaymentId || null),
+      },
+    });
+    const first = flagged.count === 1;
+    const entry = {
+      event: first
+        ? 'payhere.preapproval.notify.late_authorization'
+        : 'payhere.preapproval.notify.duplicate',
+      receivedAt,
+      savedCardId: row.id,
+      merchantReference: parsed.merchantReference,
+      signatureValid: true,
+      statusCode: parsed.statusCode,
+      outcome: first ? 'late_authorization' : 'duplicate',
+      savedCardStatus: SavedCardStatus.FAILED,
+      failureReason: row.failureReason,
+      action: first ? 'cancel_preapproval_in_payhere_merchant_portal' : null,
+    };
+    if (first) this.logger.error(entry);
+    else this.logger.log(entry);
+    return { alreadyHandled: true, lateAuthorization: true };
   }
 
   async revoke(userId: string, id: string) {
@@ -535,20 +729,100 @@ export function savedCardIsChargeable(row: {
   );
 }
 
-function toPendingRegistration(row: SavedPaymentMethod): PendingRegistrationView {
-  return {
-    id: row.id,
-    status: SavedCardStatus.PENDING,
-    consentedAt: row.consentedAt,
-  };
-}
-
 function toFailedRegistration(row: SavedPaymentMethod): FailedRegistrationView {
   return {
     id: row.id,
     status: SavedCardStatus.FAILED,
+    reason: customerFailureReason(row.failureReason),
     consentedAt: row.consentedAt,
+    failedAt: row.failedAt,
   };
+}
+
+function customerFailureReason(
+  reason: SavedCardFailureReason | null,
+): FailedRegistrationReason {
+  switch (reason) {
+    case SavedCardFailureReason.PAYHERE_DECLINED:
+      return 'DECLINED';
+    case SavedCardFailureReason.PAYHERE_CANCELLED:
+    case SavedCardFailureReason.CUSTOMER_CANCELLED:
+      return 'CANCELLED';
+    default:
+      return 'NOT_CONFIRMED';
+  }
+}
+
+function toRegistrationResult(row: SavedPaymentMethod): RegistrationResult {
+  if (row.status === SavedCardStatus.FAILED) {
+    return {
+      status: row.status,
+      savedCard: null,
+      failedRegistration: toFailedRegistration(row),
+    };
+  }
+  return {
+    status: row.status,
+    savedCard: toView(row),
+    failedRegistration: null,
+  };
+}
+
+type SavedCardWriter = Pick<Prisma.TransactionClient, 'savedPaymentMethod'>;
+
+/**
+ * PENDING -> FAILED, releasing openCardSlot. Status-guarded, so it never
+ * touches an ACTIVE card or an attempt that already ended. Returns whether
+ * this call made the transition.
+ */
+async function failPendingRegistration(
+  db: SavedCardWriter,
+  id: string,
+  reason: SavedCardFailureReason,
+  now: Date,
+  extra: Prisma.SavedPaymentMethodUpdateManyMutationInput = {},
+): Promise<boolean> {
+  const updated = await db.savedPaymentMethod.updateMany({
+    where: { id, status: SavedCardStatus.PENDING },
+    data: {
+      ...extra,
+      status: SavedCardStatus.FAILED,
+      failureReason: reason,
+      failedAt: now,
+      ...RETIRED,
+    },
+  });
+  return updated.count === 1;
+}
+
+/**
+ * Fails every PENDING registration created before `createdBefore` (optionally
+ * only the given ids). Used by the expiry-sweep backstop and the one-off
+ * legacy cleanup script. Rows and consent events are kept.
+ */
+export async function failStalePendingRegistrations(
+  db: SavedCardWriter,
+  input: {
+    createdBefore: Date;
+    reason: SavedCardFailureReason;
+    now: Date;
+    ids?: string[];
+  },
+): Promise<{ failed: number }> {
+  const updated = await db.savedPaymentMethod.updateMany({
+    where: {
+      status: SavedCardStatus.PENDING,
+      createdAt: { lt: input.createdBefore },
+      ...(input.ids ? { id: { in: input.ids } } : {}),
+    },
+    data: {
+      status: SavedCardStatus.FAILED,
+      failureReason: input.reason,
+      failedAt: input.now,
+      ...RETIRED,
+    },
+  });
+  return { failed: updated.count };
 }
 
 function toView(row: SavedPaymentMethod): SavedCardView {

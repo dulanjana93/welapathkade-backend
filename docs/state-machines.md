@@ -783,17 +783,26 @@ Unless a specific Admin correction workflow explicitly supports an operation, no
 
 This is not a consultation payment state.
 
+`PENDING` exists only while one registration flow is running (PayHere page open). It is never shown to the customer and never blocks a new registration. Every flow ends `ACTIVE` or `FAILED`.
+
 | From | Event | To |
 |---|---|---|
-| none | Customer accepts the current consent and pre-approval starts | `PENDING`, `CONSENT_GRANTED` |
-| `PENDING` | Verified PayHere status `2` with `customer_token` | `ACTIVE`, authorization on, token encrypted |
-| `PENDING` | Verified status `0`, or success without a token | stays `PENDING` |
-| `PENDING` | Verified status `-1` or `-2` | `FAILED`, no token |
+| none | Customer accepts the current consent and pre-approval starts | `PENDING`, `CONSENT_GRANTED`, holds `openCardSlot` |
+| `PENDING` | Customer starts another registration | `FAILED` (`SUPERSEDED`), slot released, new row `PENDING` |
+| `PENDING` | Verified PayHere status `2` with `customer_token` | `ACTIVE`, authorization on, token encrypted, slot released |
+| `PENDING` | Verified status `0`, or success without a token | stays `PENDING` until `complete` |
+| `PENDING` | Verified status `-1` | `FAILED` (`PAYHERE_CANCELLED`), no token, slot released |
+| `PENDING` | Verified status `-2` | `FAILED` (`PAYHERE_DECLINED`), no token, slot released |
+| `PENDING` | `complete` with outcome `CANCELLED` | `FAILED` (`CUSTOMER_CANCELLED`), slot released |
+| `PENDING` | `complete`, and no verified success within the short wait | `FAILED` (`NOT_CONFIRMED`), slot released |
+| `PENDING` | App never calls `complete`. Expiry sweep after 30 minutes (backstop) | `FAILED` (`ABANDONED`), slot released |
+| `PENDING` | Legacy cleanup script (`--apply`) | `FAILED` (`LEGACY_PENDING`), slot released |
+| `FAILED` | Verified status `2` with `customer_token` (late) | stays `FAILED`, token discarded, `lateAuthorizationAt` set once, manual PayHere cancellation |
 | `PENDING` or `ACTIVE` | Customer revokes authorization | `DISABLED`, token deleted, `CONSENT_REVOKED` |
 | any except `REMOVED` | Customer removes the card | `REMOVED`, token deleted, authorization off, `CARD_REMOVED` |
-| `DISABLED`, `REMOVED`, or `FAILED` | Another pre-approval notification | unchanged |
+| `ACTIVE`, `DISABLED`, `REMOVED`, or `FAILED` | Any other pre-approval notification | unchanged |
 
-`DISABLED` and `REMOVED` cannot return to `ACTIVE`. A replacement card is a new row and needs a new `CONSENT_GRANTED`. The browser return URL is not a transition. Local revocation does not call a PayHere cancellation API. PayHere documents merchant-account cancellation only.
+`FAILED`, `DISABLED`, and `REMOVED` cannot return to `ACTIVE`. A replacement card is a new row and needs a new `CONSENT_GRANTED`. The browser return URL and the `complete` outcome are not proof of success; only a verified notify activates a card. Local revocation does not call a PayHere cancellation API. PayHere documents merchant-account cancellation only.
 
 ## 22. Saved-card consultation charge
 

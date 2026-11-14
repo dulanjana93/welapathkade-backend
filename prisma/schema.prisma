@@ -203,6 +203,25 @@ enum SavedCardStatus {
   FAILED
 }
 
+/// Why a saved-card registration ended FAILED. Internal; the customer API maps
+/// it to DECLINED, CANCELLED, or NOT_CONFIRMED.
+enum SavedCardFailureReason {
+  /// Verified PayHere notify status -2.
+  PAYHERE_DECLINED
+  /// Verified PayHere notify status -1.
+  PAYHERE_CANCELLED
+  /// The app reported that the customer cancelled the PayHere page.
+  CUSTOMER_CANCELLED
+  /// The registration flow completed without a verified PayHere success.
+  NOT_CONFIRMED
+  /// The customer started a new registration while this one was open.
+  SUPERSEDED
+  /// The app never completed the flow. Failed by the expiry sweep backstop.
+  ABANDONED
+  /// Resolved by the one-off legacy PENDING cleanup script.
+  LEGACY_PENDING
+}
+
 enum SavedCardConsentEventType {
   CONSENT_GRANTED
   CONSENT_REVOKED
@@ -810,10 +829,17 @@ model SavedPaymentMethod {
   authorizationEnabled  Boolean         @default(false)
   revokedAt             DateTime?
   removedAt             DateTime?
-  /// User id while a registration is PENDING. Null for ACTIVE, FAILED,
-  /// DISABLED, and REMOVED, so a customer can keep more than one active card.
-  /// The unique index still allows only one in-flight registration.
+  /// User id while a registration is PENDING (only for the duration of one
+  /// registration flow). Null for ACTIVE, FAILED, DISABLED, and REMOVED. A new
+  /// registration supersedes an open one instead of being blocked.
   openCardSlot          String?         @unique @db.VarChar(191)
+  /// Set only when status is FAILED.
+  failureReason         SavedCardFailureReason?
+  failedAt              DateTime?
+  /// A verified PayHere success arrived after this registration was FAILED.
+  /// The token was discarded and never stored. The provider-side
+  /// pre-approval must be cancelled manually in the PayHere merchant portal.
+  lateAuthorizationAt   DateTime?
   createdAt             DateTime        @default(now())
   updatedAt             DateTime        @updatedAt
 

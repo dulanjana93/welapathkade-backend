@@ -143,6 +143,7 @@ export function selectPaymentGateway(
     PaymentsService,
     AppointmentLifecycleService,
     PayHereRefundService,
+    SavedCardService,
     SavedCardChargeService,
   ],
 })

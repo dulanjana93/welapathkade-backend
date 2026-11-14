@@ -108,11 +108,12 @@ export class ExpirySweepRunner
           result.abandonedUploadsRemoved +
           result.refundsStarted +
           result.refundsReconciled +
-          result.chargesReconciled >
+          result.chargesReconciled +
+          result.cardRegistrationsFailed >
         0
       ) {
         this.logger.log(
-          `Expired ${result.reservations} reservation(s), ${result.payments} payment(s), ${result.attempts} attempt(s), ${result.consultations} request(s); completed ${result.sessionsCompleted} session(s); financial snapshots ${result.financialSnapshotsCreated}; ledgers posted ${result.financialLedgersPosted}; abandoned uploads removed ${result.abandonedUploadsRemoved}; refunds started ${result.refundsStarted}; refunds reconciled ${result.refundsReconciled}; saved-card charges reconciled ${result.chargesReconciled}`,
+          `Expired ${result.reservations} reservation(s), ${result.payments} payment(s), ${result.attempts} attempt(s), ${result.consultations} request(s); completed ${result.sessionsCompleted} session(s); financial snapshots ${result.financialSnapshotsCreated}; ledgers posted ${result.financialLedgersPosted}; abandoned uploads removed ${result.abandonedUploadsRemoved}; refunds started ${result.refundsStarted}; refunds reconciled ${result.refundsReconciled}; saved-card charges reconciled ${result.chargesReconciled}; abandoned card registrations failed ${result.cardRegistrationsFailed}`,
         );
       }
       return result;

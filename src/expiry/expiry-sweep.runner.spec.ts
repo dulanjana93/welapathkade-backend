@@ -14,6 +14,7 @@ const emptyResult: ExpirySweepResult = {
   refundsStarted: 0,
   refundsReconciled: 0,
   chargesReconciled: 0,
+  cardRegistrationsFailed: 0,
   errors: [],
 };
 
@@ -32,12 +33,15 @@ function build(settings: Record<string, string | undefined>) {
 }
 
 describe('ExpirySweepRunner', () => {
+  let logSpy: jest.SpyInstance;
   let warnSpy: jest.SpyInstance;
   let errorSpy: jest.SpyInstance;
 
   beforeEach(() => {
     jest.useFakeTimers();
-    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    logSpy = jest
+      .spyOn(Logger.prototype, 'log')
+      .mockImplementation(() => undefined);
     warnSpy = jest
       .spyOn(Logger.prototype, 'warn')
       .mockImplementation(() => undefined);
@@ -153,6 +157,22 @@ describe('ExpirySweepRunner', () => {
 
       sweep.runOnce.mockResolvedValueOnce({ ...emptyResult, consultations: 2 });
       await expect(runner.tick()).resolves.toMatchObject({ consultations: 2 });
+    });
+
+    it('logs a run that only failed abandoned card registrations', async () => {
+      const { runner, sweep } = build({ nodeEnv: 'development' });
+      sweep.runOnce.mockResolvedValueOnce({
+        ...emptyResult,
+        cardRegistrationsFailed: 2,
+      });
+      await runner.tick();
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringContaining('abandoned card registrations failed 2'),
+      );
+
+      logSpy.mockClear();
+      await runner.tick();
+      expect(logSpy).not.toHaveBeenCalled();
     });
 
     it('logs step errors reported by the sweep as warnings', async () => {

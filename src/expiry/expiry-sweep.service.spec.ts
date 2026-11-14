@@ -88,6 +88,7 @@ describe('ExpirySweepService', () => {
       refundsStarted: 0,
       refundsReconciled: 0,
       chargesReconciled: 0,
+      cardRegistrationsFailed: 0,
       errors: [],
     });
   });
@@ -186,5 +187,68 @@ describe('ExpirySweepService', () => {
     await service.runOnce();
     const used = (occupancy.expireDueReservations.mock.calls[0] as [Date])[0];
     expect(used.getTime()).toBeGreaterThanOrEqual(before);
+  });
+});
+
+describe('ExpirySweepService saved-card registration backstop', () => {
+  const now = new Date('2026-11-14T04:00:00.000Z');
+  const prisma = { consultation: { updateMany: jest.fn() } };
+  const occupancy = {
+    expireDueReservations: jest.fn(),
+    expireOrphanedPendingPayments: jest.fn(),
+  };
+  const sessions = { completeDueSessions: jest.fn() };
+  const snapshots = { createDueSnapshots: jest.fn() };
+  const ledger = { postDueSnapshots: jest.fn() };
+  const attachments = { purgeAbandonedUploads: jest.fn() };
+  const savedCards = { failAbandonedRegistrations: jest.fn() };
+  const service = new ExpirySweepService(
+    prisma as never,
+    occupancy as never,
+    sessions as never,
+    snapshots as never,
+    ledger as never,
+    attachments as never,
+    undefined,
+    undefined,
+    savedCards as never,
+  );
+
+  beforeEach(() => {
+    jest.resetAllMocks();
+    prisma.consultation.updateMany.mockResolvedValue({ count: 0 });
+    occupancy.expireDueReservations.mockResolvedValue({
+      appointments: 0,
+      payments: 0,
+      attempts: 0,
+    });
+    occupancy.expireOrphanedPendingPayments.mockResolvedValue({
+      payments: 0,
+      attempts: 0,
+    });
+    sessions.completeDueSessions.mockResolvedValue({ completed: 0, errors: [] });
+    snapshots.createDueSnapshots.mockResolvedValue({
+      created: 0,
+      skipped: 0,
+      errors: [],
+    });
+    ledger.postDueSnapshots.mockResolvedValue({ posted: 0, skipped: 0, errors: [] });
+    attachments.purgeAbandonedUploads.mockResolvedValue(0);
+  });
+
+  it('fails abandoned card registrations and reports the count', async () => {
+    savedCards.failAbandonedRegistrations.mockResolvedValue({ failed: 3 });
+    const result = await service.runOnce(now);
+    expect(savedCards.failAbandonedRegistrations).toHaveBeenCalledWith(now);
+    expect(result.cardRegistrationsFailed).toBe(3);
+    expect(result.errors).toEqual([]);
+  });
+
+  it('reports a registration backstop failure without blocking other steps', async () => {
+    savedCards.failAbandonedRegistrations.mockRejectedValue(new Error('db down'));
+    const result = await service.runOnce(now);
+    expect(result.cardRegistrationsFailed).toBe(0);
+    expect(result.consultations).toBe(0);
+    expect(result.errors).toEqual(['saved-card registrations: db down']);
   });
 });

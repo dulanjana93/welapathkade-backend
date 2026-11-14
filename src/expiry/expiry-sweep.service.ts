@@ -7,6 +7,7 @@ import { FinancialSnapshotService } from '../settlement/financial-snapshot.servi
 import { ConsultationAttachmentsService } from '../consultations/consultation-attachments.service';
 import { PayHereRefundService } from '../payments/payhere-refund.service';
 import { SavedCardChargeService } from '../payments/saved-card-charge.service';
+import { SavedCardService } from '../payments/saved-card.service';
 import { SessionCompletionSweepService } from './session-completion-sweep.service';
 
 export type ExpirySweepResult = {
@@ -44,6 +45,11 @@ export type ExpirySweepResult = {
   refundsReconciled: number;
   /** Uncertain saved-card charges checked through Retrieval. Does not charge again. */
   chargesReconciled: number;
+  /**
+   * Saved-card registrations the app never completed, failed after
+   * ABANDONED_REGISTRATION_MINUTES (slot released). Backstop only.
+   */
+  cardRegistrationsFailed: number;
   /** One message per failed step; a failed step never blocks the others. */
   errors: string[];
 };
@@ -79,6 +85,7 @@ export class ExpirySweepService {
     private readonly attachments: ConsultationAttachmentsService,
     @Optional() private readonly refunds?: PayHereRefundService,
     @Optional() private readonly charges?: SavedCardChargeService,
+    @Optional() private readonly savedCards?: SavedCardService,
   ) {}
 
   async runOnce(now: Date = new Date()): Promise<ExpirySweepResult> {
@@ -94,6 +101,7 @@ export class ExpirySweepService {
       refundsStarted: 0,
       refundsReconciled: 0,
       chargesReconciled: 0,
+      cardRegistrationsFailed: 0,
       errors: [],
     };
 
@@ -162,8 +170,9 @@ export class ExpirySweepService {
     if (this.refunds) {
       try {
         result.refundsStarted = (await this.refunds.initiateDue()).started;
-        result.refundsReconciled = (await this.refunds.reconcileUnresolved())
-          .checked;
+        result.refundsReconciled = (
+          await this.refunds.reconcileUnresolved()
+        ).checked;
       } catch (error) {
         result.errors.push(`refunds: ${describe(error)}`);
       }
@@ -176,6 +185,16 @@ export class ExpirySweepService {
         ).checked;
       } catch (error) {
         result.errors.push(`saved-card charges: ${describe(error)}`);
+      }
+    }
+
+    if (this.savedCards) {
+      try {
+        result.cardRegistrationsFailed = (
+          await this.savedCards.failAbandonedRegistrations(now)
+        ).failed;
+      } catch (error) {
+        result.errors.push(`saved-card registrations: ${describe(error)}`);
       }
     }
 

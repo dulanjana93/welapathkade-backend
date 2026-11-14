@@ -27,6 +27,7 @@
     "bootstrap:admin": "ts-node -r tsconfig-paths/register src/scripts/bootstrap-admin.ts",
     "storage:verify": "ts-node -r tsconfig-paths/register src/scripts/verify-r2-storage.ts",
     "sms:smoke": "ts-node -r tsconfig-paths/register src/scripts/notify-lk-smoke.ts",
+    "saved-cards:resolve-legacy-pending": "ts-node -r tsconfig-paths/register src/scripts/resolve-legacy-pending-saved-cards.ts",
     "prisma:seed": "ts-node -r tsconfig-paths/register prisma/seed.ts",
     "prisma:migrate:deploy": "prisma migrate deploy"
   },

@@ -9,6 +9,7 @@ import {
   PaymentProvider,
   Prisma,
   SavedCardConsentEventType,
+  SavedCardFailureReason,
   SavedCardStatus,
   UserRole,
   type SavedCardConsentEvent,
@@ -20,7 +21,12 @@ import { PayHereNotificationError } from './payhere/payhere-signature';
 import {
   AUTOMATIC_PAYMENT_CONSENT_VERSION,
 } from './saved-card.consent';
-import { SavedCardService } from './saved-card.service';
+import {
+  ABANDONED_REGISTRATION_MINUTES,
+  SavedCardService,
+  failStalePendingRegistrations,
+  savedCardIsChargeable,
+} from './saved-card.service';
 
 const TOKEN = '59AFEE022CC69CA39D325E1B59130862';
 
@@ -29,18 +35,28 @@ function matchesCard(
   where?: Record<string, unknown>,
 ): boolean {
   if (!where) return true;
-  return Object.entries(where).every(([key, expected]) => {
-    if (expected === undefined) return true;
-    const actual = row[key as keyof SavedPaymentMethod];
-    if (
-      expected &&
-      typeof expected === 'object' &&
-      Array.isArray((expected as { in?: unknown }).in)
-    ) {
-      return (expected as { in: unknown[] }).in.includes(actual);
+  return Object.entries(where).every(([key, expected]) =>
+    matchesValue(row[key as keyof SavedPaymentMethod], expected),
+  );
+}
+
+/** Minimal Prisma filter semantics used by SavedCardService. */
+function matchesValue(actual: unknown, expected: unknown): boolean {
+  if (expected === undefined) return true;
+  if (expected === null) return actual === null;
+  if (expected instanceof Date) {
+    return actual instanceof Date && actual.getTime() === expected.getTime();
+  }
+  if (typeof expected === 'object') {
+    const filter = expected as { in?: unknown[]; not?: unknown; lt?: Date };
+    if (filter.in && !filter.in.includes(actual)) return false;
+    if ('not' in filter && actual === filter.not) return false;
+    if (filter.lt && !(actual instanceof Date && actual < filter.lt)) {
+      return false;
     }
-    return actual === expected;
-  });
+    return true;
+  }
+  return actual === expected;
 }
 
 function verifiedSuccess(merchantReference: string) {
@@ -112,6 +128,9 @@ describe('SavedCardService', () => {
       revokedAt: null,
       removedAt: null,
       openCardSlot: user.id,
+      failureReason: null,
+      failedAt: null,
+      lateAuthorizationAt: null,
       createdAt: now,
       updatedAt: now,
       ...data,
@@ -189,36 +208,14 @@ describe('SavedCardService', () => {
           where,
           data,
         }: {
-          where: {
-            id: string;
-            userId?: string;
-            status?: SavedCardStatus | { in?: SavedCardStatus[]; not?: SavedCardStatus };
-          };
+          where: Record<string, unknown>;
           data: Partial<SavedPaymentMethod>;
         }) => {
-          const row = cards.find((item) => item.id === where.id);
-          if (!row) return { count: 0 };
-          if (where.userId && row.userId !== where.userId) return { count: 0 };
-          const status = where.status;
-          if (typeof status === 'string' && row.status !== status) return { count: 0 };
-          if (
-            status &&
-            typeof status === 'object' &&
-            status.in &&
-            !status.in.includes(row.status)
-          ) {
-            return { count: 0 };
+          const rows = cards.filter((row) => matchesCard(row, where));
+          for (const row of rows) {
+            Object.assign(row, data, { updatedAt: new Date() });
           }
-          if (
-            status &&
-            typeof status === 'object' &&
-            status.not &&
-            row.status === status.not
-          ) {
-            return { count: 0 };
-          }
-          Object.assign(row, data, { updatedAt: new Date() });
-          return { count: 1 };
+          return { count: rows.length };
         },
       ),
     },
@@ -246,11 +243,16 @@ describe('SavedCardService', () => {
     null,
   );
 
+  const sleep = jest.fn(async () => undefined);
+  service.sleep = sleep;
+
   beforeEach(() => {
     cards.splice(0, cards.length);
     events.splice(0, events.length);
     seq = 0;
     jest.clearAllMocks();
+    sleep.mockImplementation(async () => undefined);
+    service.completionWait = { totalMs: 0, intervalMs: 0 };
   });
 
   it('refuses pre-approval without a complete billing profile or consent', async () => {
@@ -312,7 +314,9 @@ describe('SavedCardService', () => {
     expect(afterFailure.failedRegistration).toEqual({
       id: cards[0].id,
       status: SavedCardStatus.FAILED,
+      reason: 'DECLINED',
       consentedAt: cards[0].consentedAt,
+      failedAt: cards[0].failedAt,
     });
     expect(afterFailure.methods).toEqual([]);
 
@@ -463,19 +467,25 @@ describe('SavedCardService', () => {
     await expect(service.readActiveToken(user.id, cards[0].id)).resolves.toBe(
       TOKEN,
     );
-    await expect(service.start(user, true)).rejects.toBeInstanceOf(
-      ConflictException,
-    );
+    // Starting again while a registration is open supersedes it instead of
+    // blocking the customer.
+    const replacement = await service.start(user, true);
+    expect(pending).toMatchObject({
+      status: SavedCardStatus.FAILED,
+      failureReason: SavedCardFailureReason.SUPERSEDED,
+      openCardSlot: null,
+    });
     expect(cards.filter((row) => row.status === SavedCardStatus.PENDING)).toHaveLength(
       1,
     );
+    const open = cards.find((row) => row.id === replacement.savedCardId)!;
 
     payhere.verifyPreapproval.mockReturnValue(
-      verifiedSuccess(pending.merchantReference),
+      verifiedSuccess(open.merchantReference),
     );
     await service.handleNotify({});
-    expect(pending.status).toBe(SavedCardStatus.ACTIVE);
-    expect(pending.openCardSlot).toBeNull();
+    expect(open.status).toBe(SavedCardStatus.ACTIVE);
+    expect(open.openCardSlot).toBeNull();
     expect(cards[0].status).toBe(SavedCardStatus.ACTIVE);
 
     const third = await service.start(user, true);
@@ -542,7 +552,7 @@ describe('SavedCardService', () => {
     return pending;
   }
 
-  it('lists usable active cards and one pending registration only', async () => {
+  it('lists usable active cards only and never a pending registration', async () => {
     await service.start(user, true);
     payhere.verifyPreapproval.mockReturnValue({
       merchantReference: cards[0].merchantReference,
@@ -567,8 +577,7 @@ describe('SavedCardService', () => {
     const removed = await activatePending();
     await service.remove(user.id, removed.id);
 
-    const whilePending = await service.start(user, true);
-    const open = cards.find((row) => row.id === whilePending.savedCardId)!;
+    await service.start(user, true);
     const listed = await service.list(user.id);
     expect(listed.consent.version).toBe(AUTOMATIC_PAYMENT_CONSENT_VERSION);
     expect(listed.methods.map((row) => row.id).sort()).toEqual(
@@ -577,11 +586,7 @@ describe('SavedCardService', () => {
     expect(listed.methods.every((row) => row.status === SavedCardStatus.ACTIVE)).toBe(
       true,
     );
-    expect(listed.pendingRegistration).toEqual({
-      id: open.id,
-      status: SavedCardStatus.PENDING,
-      consentedAt: open.consentedAt,
-    });
+    expect(listed.pendingRegistration).toBeNull();
     expect(listed.failedRegistration).toBeNull();
     const serialized = JSON.stringify(listed);
     expect(serialized).not.toContain(TOKEN);
@@ -607,6 +612,402 @@ describe('SavedCardService', () => {
         SavedCardStatus.REMOVED,
       ].sort(),
     );
+  });
+
+  describe('registration lifecycle without a persistent PENDING state', () => {
+    function notify(
+      row: SavedPaymentMethod,
+      statusCode: 2 | 0 | -1 | -2,
+      options: { token?: string | null; paymentId?: string } = {},
+    ) {
+      const outcome =
+        statusCode === 2 ? 'success' : statusCode === 0 ? 'pending' : 'failed';
+      const token = options.token === undefined ? TOKEN : options.token;
+      payhere.verifyPreapproval.mockReturnValue({
+        merchantReference: row.merchantReference,
+        providerPaymentId: options.paymentId ?? '9100',
+        amount: '10.00',
+        currency: 'LKR',
+        statusCode,
+        outcome,
+        success: outcome === 'success',
+        customerToken: outcome === 'success' ? token : null,
+        cardBrand: outcome === 'success' ? 'VISA' : null,
+        cardLast4: outcome === 'success' ? '4242' : null,
+      });
+      return service.handleNotify({ order_id: row.merchantReference });
+    }
+
+    async function startRow() {
+      const started = await service.start(user, true);
+      return cards.find((row) => row.id === started.savedCardId)!;
+    }
+
+    function openSlots() {
+      return cards.filter((row) => row.openCardSlot === user.id);
+    }
+
+    let errorSpy: jest.SpyInstance;
+    let logSpy: jest.SpyInstance;
+    beforeEach(() => {
+      errorSpy = jest
+        .spyOn(Logger.prototype, 'error')
+        .mockImplementation(() => undefined);
+      logSpy = jest
+        .spyOn(Logger.prototype, 'log')
+        .mockImplementation(() => undefined);
+    });
+    afterEach(() => {
+      errorSpy.mockRestore();
+      logSpy.mockRestore();
+    });
+
+    it('1. activates a card only from a verified notify, then complete reports ACTIVE', async () => {
+      const row = await startRow();
+      await expect(notify(row, 2)).resolves.toMatchObject({ active: true });
+      const result = await service.complete(user.id, row.id, 'RETURNED');
+      expect(result.status).toBe(SavedCardStatus.ACTIVE);
+      expect(result.savedCard).toMatchObject({
+        id: row.id,
+        cardBrand: 'VISA',
+        cardLast4: '4242',
+        authorizationEnabled: true,
+      });
+      expect(result.failedRegistration).toBeNull();
+      expect(JSON.stringify(result)).not.toContain(TOKEN);
+      expect(JSON.stringify(result)).not.toContain('ciphertext');
+      expect(row.openCardSlot).toBeNull();
+      expect(sleep).not.toHaveBeenCalled();
+      const listed = await service.list(user.id);
+      expect(listed.methods.map((card) => card.id)).toEqual([row.id]);
+      expect(listed.failedRegistration).toBeNull();
+      expect(listed.pendingRegistration).toBeNull();
+    });
+
+    it('2. PayHere rejection (status -2) fails the attempt and is never chargeable', async () => {
+      const row = await startRow();
+      await expect(notify(row, -2)).resolves.toMatchObject({ failed: true });
+      expect(row).toMatchObject({
+        status: SavedCardStatus.FAILED,
+        failureReason: SavedCardFailureReason.PAYHERE_DECLINED,
+        openCardSlot: null,
+        authorizationEnabled: false,
+        tokenCiphertext: null,
+      });
+      const result = await service.complete(user.id, row.id, 'RETURNED');
+      expect(result).toMatchObject({
+        status: SavedCardStatus.FAILED,
+        savedCard: null,
+        failedRegistration: { id: row.id, reason: 'DECLINED' },
+      });
+      expect(savedCardIsChargeable(row)).toBe(false);
+      await expect(
+        service.readActiveToken(user.id, row.id),
+      ).rejects.toBeInstanceOf(ConflictException);
+      const listed = await service.list(user.id);
+      expect(listed.methods).toEqual([]);
+      expect(listed.failedRegistration).toMatchObject({
+        id: row.id,
+        reason: 'DECLINED',
+      });
+    });
+
+    it('3. customer cancel fails immediately without waiting for PayHere', async () => {
+      service.completionWait = { totalMs: 8000, intervalMs: 1000 };
+      const row = await startRow();
+      const result = await service.complete(user.id, row.id, 'CANCELLED');
+      expect(sleep).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        status: SavedCardStatus.FAILED,
+        failedRegistration: { reason: 'CANCELLED' },
+      });
+      expect(row.failureReason).toBe(SavedCardFailureReason.CUSTOMER_CANCELLED);
+
+      const viaPayHere = await startRow();
+      await notify(viaPayHere, -1);
+      expect(viaPayHere.failureReason).toBe(
+        SavedCardFailureReason.PAYHERE_CANCELLED,
+      );
+      await expect(
+        service.complete(user.id, viaPayHere.id, 'CANCELLED'),
+      ).resolves.toMatchObject({ failedRegistration: { reason: 'CANCELLED' } });
+    });
+
+    it('4. WebView closing without verified success waits briefly, then fails', async () => {
+      service.completionWait = { totalMs: 3000, intervalMs: 1000 };
+      const row = await startRow();
+      // PayHere status 0 and a success without a token are not verified success.
+      await notify(row, 0);
+      await notify(row, 2, { token: null });
+      expect(row.status).toBe(SavedCardStatus.PENDING);
+      const result = await service.complete(user.id, row.id, 'CLOSED');
+      expect(sleep).toHaveBeenCalledTimes(3);
+      expect(result).toMatchObject({
+        status: SavedCardStatus.FAILED,
+        failedRegistration: { reason: 'NOT_CONFIRMED' },
+      });
+      expect(row.failureReason).toBe(SavedCardFailureReason.NOT_CONFIRMED);
+      expect(row.openCardSlot).toBeNull();
+    });
+
+    it('4b. a notify that lands during the completion wait activates the card', async () => {
+      service.completionWait = { totalMs: 8000, intervalMs: 1000 };
+      const row = await startRow();
+      sleep.mockImplementation(async () => {
+        if (sleep.mock.calls.length === 2) await notify(row, 2);
+      });
+      const result = await service.complete(user.id, row.id, 'RETURNED');
+      expect(sleep).toHaveBeenCalledTimes(2);
+      expect(result.status).toBe(SavedCardStatus.ACTIVE);
+      expect(row.status).toBe(SavedCardStatus.ACTIVE);
+    });
+
+    it('5. a missing notification never leaves the attempt PENDING', async () => {
+      const row = await startRow();
+      const result = await service.complete(user.id, row.id, 'RETURNED');
+      expect(result.status).toBe(SavedCardStatus.FAILED);
+      expect(row.status).toBe(SavedCardStatus.FAILED);
+      expect(row.failedAt).toBeInstanceOf(Date);
+      const listed = await service.list(user.id);
+      expect(listed.pendingRegistration).toBeNull();
+      expect(listed.failedRegistration).toMatchObject({
+        id: row.id,
+        reason: 'NOT_CONFIRMED',
+      });
+    });
+
+    it('6. a delayed success after FAILED is recorded for review and never reactivates', async () => {
+      const row = await startRow();
+      await service.complete(user.id, row.id, 'RETURNED');
+      const late = await notify(row, 2, { paymentId: '777001' });
+      expect(late).toEqual({ alreadyHandled: true, lateAuthorization: true });
+      expect(row).toMatchObject({
+        status: SavedCardStatus.FAILED,
+        authorizationEnabled: false,
+        tokenCiphertext: null,
+        tokenIv: null,
+        tokenTag: null,
+        openCardSlot: null,
+        payherePaymentId: '777001',
+      });
+      expect(row.lateAuthorizationAt).toBeInstanceOf(Date);
+      expect(savedCardIsChargeable(row)).toBe(false);
+      const logged = errorSpy.mock.calls.map((call) => call[0] as { event?: string });
+      expect(logged.map((entry) => entry.event)).toContain(
+        'payhere.preapproval.notify.late_authorization',
+      );
+      expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(TOKEN);
+      expect((await service.list(user.id)).methods).toEqual([]);
+    });
+
+    it('6b. a success that loses the race to complete is recorded, not activated', async () => {
+      const row = await startRow();
+      payhere.verifyPreapproval.mockReturnValue({
+        ...verifiedSuccess(row.merchantReference),
+        statusCode: 2,
+      });
+      // complete fails the row after handleNotify read it as PENDING.
+      prisma.savedPaymentMethod.findUnique.mockImplementationOnce(async () => {
+        const snapshot = { ...row };
+        await service.complete(user.id, row.id, 'RETURNED');
+        return snapshot;
+      });
+      await expect(
+        service.handleNotify({ order_id: row.merchantReference }),
+      ).resolves.toEqual({ alreadyHandled: true, lateAuthorization: true });
+      expect(row.status).toBe(SavedCardStatus.FAILED);
+      expect(row.tokenCiphertext).toBeNull();
+      expect(row.lateAuthorizationAt).toBeInstanceOf(Date);
+    });
+
+    it('7. duplicate notifications and repeated completes are idempotent', async () => {
+      const row = await startRow();
+      await notify(row, 2);
+      const ciphertext = row.tokenCiphertext;
+      await expect(notify(row, 2)).resolves.toMatchObject({
+        alreadyHandled: true,
+      });
+      await expect(notify(row, -2)).resolves.toMatchObject({
+        alreadyHandled: true,
+      });
+      expect(row.status).toBe(SavedCardStatus.ACTIVE);
+      expect(row.tokenCiphertext).toBe(ciphertext);
+      const first = await service.complete(user.id, row.id, 'RETURNED');
+      const second = await service.complete(user.id, row.id, 'CLOSED');
+      expect(second).toEqual(first);
+
+      const failed = await startRow();
+      await service.complete(user.id, failed.id, 'RETURNED');
+      await notify(failed, 2);
+      const flaggedAt = failed.lateAuthorizationAt;
+      errorSpy.mockClear();
+      await expect(notify(failed, 2)).resolves.toMatchObject({
+        alreadyHandled: true,
+      });
+      expect(failed.lateAuthorizationAt).toBe(flaggedAt);
+      expect(errorSpy).not.toHaveBeenCalled();
+      const failedAt = failed.failedAt;
+      await service.complete(user.id, failed.id, 'CANCELLED');
+      expect(failed.failedAt).toBe(failedAt);
+      expect(failed.failureReason).toBe(SavedCardFailureReason.NOT_CONFIRMED);
+    });
+
+    it('8. a customer can retry immediately after FAILED', async () => {
+      const first = await startRow();
+      await service.complete(user.id, first.id, 'CLOSED');
+      const retry = await startRow();
+      expect(retry.id).not.toBe(first.id);
+      expect(retry.status).toBe(SavedCardStatus.PENDING);
+      await notify(retry, 2);
+      await expect(
+        service.complete(user.id, retry.id, 'RETURNED'),
+      ).resolves.toMatchObject({ status: SavedCardStatus.ACTIVE });
+      const listed = await service.list(user.id);
+      expect(listed.methods.map((card) => card.id)).toEqual([retry.id]);
+      expect(listed.failedRegistration).toBeNull();
+      expect(
+        events.filter(
+          (event) => event.type === SavedCardConsentEventType.CONSENT_GRANTED,
+        ),
+      ).toHaveLength(2);
+    });
+
+    it('9. an existing ACTIVE card is unchanged by a failed or late registration', async () => {
+      const active = await startRow();
+      await notify(active, 2);
+      const before = { ...active };
+      const next = await startRow();
+      await service.complete(user.id, next.id, 'RETURNED');
+      await notify(next, 2);
+      await notify(active, -2);
+      await expect(
+        service.complete(user.id, active.id, 'CANCELLED'),
+      ).resolves.toMatchObject({ status: SavedCardStatus.ACTIVE });
+      expect(active).toMatchObject({
+        status: SavedCardStatus.ACTIVE,
+        authorizationEnabled: true,
+        tokenCiphertext: before.tokenCiphertext,
+        failureReason: null,
+        lateAuthorizationAt: null,
+      });
+      await expect(service.readActiveToken(user.id, active.id)).resolves.toBe(
+        TOKEN,
+      );
+      expect((await service.list(user.id)).methods.map((c) => c.id)).toEqual([
+        active.id,
+      ]);
+    });
+
+    it('10. an older registration cannot interfere with a newer one', async () => {
+      const older = await startRow();
+      const newer = await startRow();
+      expect(older).toMatchObject({
+        status: SavedCardStatus.FAILED,
+        failureReason: SavedCardFailureReason.SUPERSEDED,
+        openCardSlot: null,
+      });
+      expect(openSlots().map((row) => row.id)).toEqual([newer.id]);
+
+      await notify(older, 2);
+      await notify(older, -2);
+      await service.complete(user.id, older.id, 'CANCELLED');
+      expect(older.status).toBe(SavedCardStatus.FAILED);
+      expect(older.lateAuthorizationAt).toBeInstanceOf(Date);
+      expect(newer).toMatchObject({
+        status: SavedCardStatus.PENDING,
+        openCardSlot: user.id,
+        failureReason: null,
+      });
+
+      await notify(newer, 2);
+      await expect(
+        service.complete(user.id, newer.id, 'RETURNED'),
+      ).resolves.toMatchObject({ status: SavedCardStatus.ACTIVE });
+      expect(older.status).toBe(SavedCardStatus.FAILED);
+      expect(older.tokenCiphertext).toBeNull();
+    });
+
+    it('11. every failure path releases openCardSlot', async () => {
+      const declined = await startRow();
+      await notify(declined, -2);
+      expect(openSlots()).toEqual([]);
+      const cancelled = await startRow();
+      await service.complete(user.id, cancelled.id, 'CANCELLED');
+      expect(openSlots()).toEqual([]);
+      const unconfirmed = await startRow();
+      await service.complete(user.id, unconfirmed.id, 'RETURNED');
+      expect(openSlots()).toEqual([]);
+      const superseded = await startRow();
+      await startRow();
+      expect(superseded.openCardSlot).toBeNull();
+      expect(openSlots()).toHaveLength(1);
+      await service.failAbandonedRegistrations(
+        new Date(Date.now() + 365 * 24 * 60 * 60_000),
+      );
+      expect(openSlots()).toEqual([]);
+    });
+
+    it('12. no customer can remain persistently PENDING', async () => {
+      const abandoned = await startRow();
+      const createdAt = abandoned.createdAt.getTime();
+      await expect(
+        service.failAbandonedRegistrations(
+          new Date(createdAt + (ABANDONED_REGISTRATION_MINUTES - 1) * 60_000),
+        ),
+      ).resolves.toEqual({ failed: 0 });
+      expect(abandoned.status).toBe(SavedCardStatus.PENDING);
+      // Even before the backstop, the customer is never blocked or shown PENDING.
+      expect((await service.list(user.id)).pendingRegistration).toBeNull();
+
+      await expect(
+        service.failAbandonedRegistrations(
+          new Date(createdAt + (ABANDONED_REGISTRATION_MINUTES + 1) * 60_000),
+        ),
+      ).resolves.toEqual({ failed: 1 });
+      expect(abandoned).toMatchObject({
+        status: SavedCardStatus.FAILED,
+        failureReason: SavedCardFailureReason.ABANDONED,
+        openCardSlot: null,
+      });
+      await expect(
+        service.failAbandonedRegistrations(
+          new Date(createdAt + 2 * ABANDONED_REGISTRATION_MINUTES * 60_000),
+        ),
+      ).resolves.toEqual({ failed: 0 });
+      expect(cards.some((row) => row.status === SavedCardStatus.PENDING)).toBe(
+        false,
+      );
+      expect(events).toHaveLength(1);
+    });
+
+    it('resolves legacy PENDING rows by id without touching other rows or consent history', async () => {
+      const active = await startRow();
+      await notify(active, 2);
+      const legacy = await startRow();
+      const eventCount = events.length;
+      const result = await failStalePendingRegistrations(prisma as never, {
+        createdBefore: new Date(legacy.createdAt.getTime() + 1),
+        reason: SavedCardFailureReason.LEGACY_PENDING,
+        now: new Date(),
+        ids: [legacy.id, active.id],
+      });
+      expect(result).toEqual({ failed: 1 });
+      expect(legacy).toMatchObject({
+        status: SavedCardStatus.FAILED,
+        failureReason: SavedCardFailureReason.LEGACY_PENDING,
+        openCardSlot: null,
+      });
+      expect(active.status).toBe(SavedCardStatus.ACTIVE);
+      expect(events).toHaveLength(eventCount);
+    });
+
+    it('rejects completing another customer\'s registration', async () => {
+      const row = await startRow();
+      await expect(
+        service.complete('someone-else', row.id, 'RETURNED'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(row.status).toBe(SavedCardStatus.PENDING);
+    });
   });
 });
 
