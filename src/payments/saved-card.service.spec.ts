@@ -26,12 +26,20 @@ const TOKEN = '59AFEE022CC69CA39D325E1B59130862';
 
 function matchesCard(
   row: SavedPaymentMethod,
-  where?: Partial<SavedPaymentMethod>,
+  where?: Record<string, unknown>,
 ): boolean {
   if (!where) return true;
   return Object.entries(where).every(([key, expected]) => {
     if (expected === undefined) return true;
-    return row[key as keyof SavedPaymentMethod] === expected;
+    const actual = row[key as keyof SavedPaymentMethod];
+    if (
+      expected &&
+      typeof expected === 'object' &&
+      Array.isArray((expected as { in?: unknown }).in)
+    ) {
+      return (expected as { in: unknown[] }).in.includes(actual);
+    }
+    return actual === expected;
   });
 }
 
@@ -299,6 +307,15 @@ describe('SavedCardService', () => {
     expect(cards[0].tokenCiphertext).toBeNull();
     expect(cards[0].openCardSlot).toBeNull();
 
+    const afterFailure = await service.list(user.id);
+    expect(afterFailure.pendingRegistration).toBeNull();
+    expect(afterFailure.failedRegistration).toEqual({
+      id: cards[0].id,
+      status: SavedCardStatus.FAILED,
+      consentedAt: cards[0].consentedAt,
+    });
+    expect(afterFailure.methods).toEqual([]);
+
     await service.start(user, true);
     const pending = cards.find((row) => row.status === SavedCardStatus.PENDING)!;
     payhere.verifyPreapproval.mockReturnValue({
@@ -565,14 +582,21 @@ describe('SavedCardService', () => {
       status: SavedCardStatus.PENDING,
       consentedAt: open.consentedAt,
     });
+    expect(listed.failedRegistration).toBeNull();
     const serialized = JSON.stringify(listed);
     expect(serialized).not.toContain(TOKEN);
     expect(serialized).not.toContain('ciphertext');
     expect(serialized).not.toContain('tokenIv');
     expect(serialized).not.toContain('merchant_secret');
-    expect(serialized).not.toContain(SavedCardStatus.FAILED);
-    expect(serialized).not.toContain(SavedCardStatus.DISABLED);
-    expect(serialized).not.toContain(SavedCardStatus.REMOVED);
+    expect(listed.methods.map((row) => row.status)).not.toContain(
+      SavedCardStatus.FAILED,
+    );
+    expect(listed.methods.map((row) => row.status)).not.toContain(
+      SavedCardStatus.DISABLED,
+    );
+    expect(listed.methods.map((row) => row.status)).not.toContain(
+      SavedCardStatus.REMOVED,
+    );
     expect(cards.map((row) => row.status).sort()).toEqual(
       [
         SavedCardStatus.ACTIVE,

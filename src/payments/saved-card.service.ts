@@ -63,6 +63,17 @@ export type PendingRegistrationView = {
   consentedAt: Date;
 };
 
+/**
+ * Customer-visible terminal registration failure. Shown only when PayHere
+ * notify confirmed failure and no PENDING registration remains. Not a
+ * chargeable payment method.
+ */
+export type FailedRegistrationView = {
+  id: string;
+  status: typeof SavedCardStatus.FAILED;
+  consentedAt: Date;
+};
+
 const RETIRED = {
   authorizationEnabled: false,
   tokenCiphertext: null,
@@ -101,7 +112,7 @@ export class SavedCardService {
   }
 
   async list(userId: string) {
-    const [rows, pending] = await Promise.all([
+    const [rows, latestAttempt] = await Promise.all([
       this.prisma.savedPaymentMethod.findMany({
         where: {
           userId,
@@ -112,15 +123,31 @@ export class SavedCardService {
         },
         orderBy: { createdAt: 'desc' },
       }),
+      // Newest registration attempt drives pending/failed UI. An older FAILED
+      // row must not surface after a later ACTIVE card is registered.
       this.prisma.savedPaymentMethod.findFirst({
-        where: { userId, status: SavedCardStatus.PENDING },
+        where: {
+          userId,
+          status: {
+            in: [
+              SavedCardStatus.PENDING,
+              SavedCardStatus.FAILED,
+              SavedCardStatus.ACTIVE,
+            ],
+          },
+        },
         orderBy: { createdAt: 'desc' },
       }),
     ]);
+    const pending =
+      latestAttempt?.status === SavedCardStatus.PENDING ? latestAttempt : null;
+    const failed =
+      latestAttempt?.status === SavedCardStatus.FAILED ? latestAttempt : null;
     return {
       consent: this.consent(),
       methods: rows.map(toView),
       pendingRegistration: pending ? toPendingRegistration(pending) : null,
+      failedRegistration: failed ? toFailedRegistration(failed) : null,
     };
   }
 
@@ -512,6 +539,14 @@ function toPendingRegistration(row: SavedPaymentMethod): PendingRegistrationView
   return {
     id: row.id,
     status: SavedCardStatus.PENDING,
+    consentedAt: row.consentedAt,
+  };
+}
+
+function toFailedRegistration(row: SavedPaymentMethod): FailedRegistrationView {
+  return {
+    id: row.id,
+    status: SavedCardStatus.FAILED,
     consentedAt: row.consentedAt,
   };
 }

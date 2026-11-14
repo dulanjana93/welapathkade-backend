@@ -31,9 +31,9 @@ export class SavedCardController {
 
   @Get()
   @ApiOperation({
-    summary: 'Usable saved cards and any in-progress registration',
+    summary: 'Usable saved cards and any in-progress or failed registration',
     description:
-      'Returns the consent text the customer must accept, usable ACTIVE cards, and at most one PENDING registration. FAILED, DISABLED, and REMOVED rows stay stored and are omitted. Tokens, secrets, and raw PayHere notifications are not included.',
+      'Returns the consent text the customer must accept, usable ACTIVE cards, at most one PENDING registration, and (when no PENDING remains) the most recent FAILED registration for retry UI. FAILED rows are never chargeable methods. DISABLED and REMOVED rows stay stored and are omitted from methods. Tokens, secrets, and raw PayHere notifications are not included.',
   })
   @ApiForbiddenResponse({ description: 'PUBLIC role required' })
   list(@CurrentUser() user: User) {
