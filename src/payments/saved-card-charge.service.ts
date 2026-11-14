@@ -263,7 +263,10 @@ export class SavedCardChargeService {
    * Retrieval only. A missing or ambiguous result stays unresolved and does
    * not start another charge.
    */
-  async reconcileOne(attemptId: string): Promise<SavedCardChargeView> {
+  async reconcileOne(
+    attemptId: string,
+    options?: { reason?: 'manual_reconciliation' | 'expiry_sweep_reconciliation' },
+  ): Promise<SavedCardChargeView> {
     const attempt = await this.prisma.paymentAttempt.findUnique({
       where: { id: attemptId },
       include: { payment: { include: { appointment: true } } },
@@ -286,7 +289,7 @@ export class SavedCardChargeService {
         currency: attempt.payment.currency,
         providerPaymentId: attempt.providerPaymentId ?? undefined,
       },
-      { reason: 'manual_reconciliation' },
+      { reason: options?.reason ?? 'manual_reconciliation' },
     );
     if (
       verified.success &&
@@ -310,8 +313,15 @@ export class SavedCardChargeService {
 
   async reconcileUnresolved(): Promise<{ checked: number }> {
     if (!this.payhere) return { checked: 0 };
+    // Terminal EXPIRED rows stay requiresReview until an operator clears the
+    // slot. Re-querying Retrieval every sweep does not change them and blocks
+    // the batch window for genuinely unresolved PENDING charges.
     const rows = await this.prisma.paymentAttempt.findMany({
-      where: { requiresReview: true, merchantReference: { startsWith: 'sc_' } },
+      where: {
+        requiresReview: true,
+        merchantReference: { startsWith: 'sc_' },
+        status: { not: PaymentStatus.EXPIRED },
+      },
       orderBy: { updatedAt: 'asc' },
       take: 20,
       select: { id: true },
@@ -320,7 +330,9 @@ export class SavedCardChargeService {
     for (const row of rows) {
       checked += 1;
       try {
-        await this.reconcileOne(row.id);
+        await this.reconcileOne(row.id, {
+          reason: 'expiry_sweep_reconciliation',
+        });
       } catch {
         // One failed lookup must not stop the rest or start a new charge.
       }

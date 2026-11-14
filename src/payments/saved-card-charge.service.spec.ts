@@ -1076,4 +1076,74 @@ describe('SavedCardChargeService', () => {
     ]);
     expect(tx.paymentAttempt.update).not.toHaveBeenCalled();
   });
+
+  it('excludes terminal EXPIRED attempts from automatic reconciliation', async () => {
+    prisma.paymentAttempt.findMany.mockResolvedValue([]);
+    const result = await service.reconcileUnresolved();
+    expect(result).toEqual({ checked: 0 });
+    expect(prisma.paymentAttempt.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          requiresReview: true,
+          merchantReference: { startsWith: 'sc_' },
+          status: { not: PaymentStatus.EXPIRED },
+        }),
+        take: 20,
+      }),
+    );
+    expect(prisma.paymentAttempt.findUnique).not.toHaveBeenCalled();
+    expect(payhere.verifyByReference).not.toHaveBeenCalled();
+  });
+
+  it('reconciles only non-expired review rows and labels the sweep reason', async () => {
+    prisma.paymentAttempt.findMany.mockResolvedValue([{ id: 'att-pending' }]);
+    prisma.paymentAttempt.findUnique.mockResolvedValue({
+      id: 'att-pending',
+      merchantReference: 'sc_pending',
+      status: PaymentStatus.PENDING,
+      requiresReview: true,
+      openChargeSlot: 'pay-1',
+      providerPaymentId: null,
+      payment: {
+        amount: new Prisma.Decimal('1500.00'),
+        currency: 'LKR',
+        appointmentId: 'apt-1',
+        appointment: { id: 'apt-1', status: AppointmentStatus.PAYMENT_PENDING },
+      },
+    });
+    payhere.verifyByReference.mockResolvedValue({
+      success: false,
+      pending: true,
+      ambiguous: false,
+    });
+    prisma.appointment.findUniqueOrThrow.mockResolvedValue(
+      readyAppointment({
+        payments: [
+          {
+            id: 'pay-1',
+            status: PaymentStatus.PENDING,
+            attempts: [
+              {
+                id: 'att-pending',
+                merchantReference: 'sc_pending',
+                status: PaymentStatus.PENDING,
+                requiresReview: true,
+                openChargeSlot: 'pay-1',
+                createdAt: new Date(),
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const result = await service.reconcileUnresolved();
+    expect(result).toEqual({ checked: 1 });
+    expect(payhere.verifyByReference).toHaveBeenCalledWith(
+      'sc_pending',
+      expect.objectContaining({ amount: '1500.00', currency: 'LKR' }),
+      { reason: 'expiry_sweep_reconciliation' },
+    );
+    expect(payments.finalizeVerified).not.toHaveBeenCalled();
+  });
 });

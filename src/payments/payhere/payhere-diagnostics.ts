@@ -6,6 +6,7 @@
 export type PayHereRetrievalReason =
   | 'post_charge'
   | 'manual_reconciliation'
+  | 'expiry_sweep_reconciliation'
   | 'customer_sync'
   | 'refund_lookup';
 
