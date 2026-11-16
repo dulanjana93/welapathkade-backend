@@ -31,6 +31,7 @@ export default registerAs('app', () => ({
   payhereNotifyUrl: blank(process.env.PAYHERE_NOTIFY_URL),
   payhereReturnUrl: blank(process.env.PAYHERE_RETURN_URL),
   payhereCancelUrl: blank(process.env.PAYHERE_CANCEL_URL),
+  payhereAppPackageName: blank(process.env.PAYHERE_APP_PACKAGE_NAME),
 }));
 
 function blank(value: string | undefined): string | undefined {

@@ -529,6 +529,108 @@ describe('PayHere pre-approval', () => {
     expect(JSON.stringify(form)).not.toContain(SECRET);
   });
 
+  it('omits platform and referer when no app package name is configured', async () => {
+    const gateway = new PayHereGateway(settings());
+    const form = gateway.createPreapproval({
+      merchantReference: 'pa_order_1',
+      customer: {
+        firstName: 'Nimal',
+        lastName: 'Perera',
+        email: 'nimal@example.com',
+        phone: '+94771234567',
+        address: '12 Temple Road',
+        city: 'Colombo',
+        country: 'Sri Lanka',
+      },
+    });
+    expect(form.fields.platform).toBeUndefined();
+    expect(form.fields.referer).toBeUndefined();
+    const checkout = await gateway.createCheckout({
+      merchantReference: 'wp_apt_1',
+      amount: '1500',
+      currency: 'LKR',
+      appointmentId: 'apt-1',
+      consultationId: 'c-1',
+      customer: {
+        id: 'u1',
+        name: 'Nimal',
+        phone: '+94771234567',
+        firstName: 'Nimal',
+        lastName: 'Perera',
+        email: 'nimal@example.com',
+        address: '12 Temple Road',
+        city: 'Colombo',
+        country: 'Sri Lanka',
+      },
+    });
+    const checkoutFields = checkout.checkout.fields as Record<string, string>;
+    expect(checkoutFields.platform).toBeUndefined();
+    expect(checkoutFields.referer).toBeUndefined();
+  });
+
+  it('identifies the registered App entry with platform and referer; the hash is unchanged', async () => {
+    const gateway = new PayHereGateway({
+      ...settings(),
+      appPackageName: 'lk.welapathkade.user',
+    });
+    const form = gateway.createPreapproval({
+      merchantReference: 'pa_order_1',
+      customer: {
+        firstName: 'Nimal',
+        lastName: 'Perera',
+        email: 'nimal@example.com',
+        phone: '+94771234567',
+        address: '12 Temple Road',
+        city: 'Colombo',
+        country: 'Sri Lanka',
+      },
+    });
+    expect(form.fields.platform).toBe('android');
+    expect(form.fields.referer).toBe('lk.welapathkade.user');
+    expect(form.fields.amount).toBeUndefined();
+    expect(form.fields.hash).toBe(
+      checkoutHash({
+        merchantId: MERCHANT_ID,
+        orderId: 'pa_order_1',
+        amount: PAYHERE_PREAPPROVAL_HASH_AMOUNT_LKR,
+        currency: 'LKR',
+        merchantSecret: SECRET,
+      }),
+    );
+
+    const checkout = await gateway.createCheckout({
+      merchantReference: 'wp_apt_1',
+      amount: '1500',
+      currency: 'LKR',
+      appointmentId: 'apt-1',
+      consultationId: 'c-1',
+      customer: {
+        id: 'u1',
+        name: 'Nimal',
+        phone: '+94771234567',
+        firstName: 'Nimal',
+        lastName: 'Perera',
+        email: 'nimal@example.com',
+        address: '12 Temple Road',
+        city: 'Colombo',
+        country: 'Sri Lanka',
+      },
+    });
+    const checkoutFields = checkout.checkout.fields as Record<string, string>;
+    expect(checkoutFields.platform).toBe('android');
+    expect(checkoutFields.referer).toBe('lk.welapathkade.user');
+    expect(checkoutFields.hash).toBe(
+      checkoutHash({
+        merchantId: MERCHANT_ID,
+        orderId: 'wp_apt_1',
+        amount: '1500.00',
+        currency: 'LKR',
+        merchantSecret: SECRET,
+      }),
+    );
+    expect(JSON.stringify({ form, checkout })).not.toContain(SECRET);
+  });
+
   it('rejects a bad pre-approval signature and the wrong merchant', () => {
     const gateway = new PayHereGateway(settings());
     const fields = {

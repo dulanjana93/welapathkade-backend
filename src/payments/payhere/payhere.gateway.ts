@@ -51,7 +51,36 @@ export type PayHereSettings = {
   notifyUrl: string;
   returnUrl: string;
   cancelUrl: string;
+  /**
+   * Package name of the mobile app registered as an **App** entry under
+   * PayHere Integrations (Domains & Credentials), e.g. `lk.welapathkade.user`.
+   * PayHere matches an App entry by the `platform` and `referer` form fields
+   * its mobile SDK sends, not by the HTTP Referer header. Without them every
+   * hosted checkout and pre-approval page answers "Unauthorized payment
+   * request". Leave unset when the merchant secret belongs to a Domain entry.
+   */
+  appPackageName?: string;
 };
+
+/**
+ * Value of the `platform` form field for the hosted pages. PayHere accepts
+ * `android` and `ios` for an App entry; the hash does not cover this field.
+ */
+export const PAYHERE_HOSTED_APP_PLATFORM = 'android';
+
+/**
+ * Extra hosted-form fields that identify the registered App entry. Empty when
+ * no app package name is configured. These fields are not part of the hash.
+ */
+export function appIdentityFields(
+  settings: Pick<PayHereSettings, 'appPackageName'>,
+): Record<string, string> {
+  if (!settings.appPackageName) return {};
+  return {
+    platform: PAYHERE_HOSTED_APP_PLATFORM,
+    referer: settings.appPackageName,
+  };
+}
 
 type TokenCache = { token: string; expiresAtMs: number };
 
@@ -270,6 +299,7 @@ export class PayHereGateway {
         currency: 'LKR',
         merchantSecret: this.settings.merchantSecret,
       }),
+      ...appIdentityFields(this.settings),
     };
     return {
       checkout: {
@@ -319,6 +349,7 @@ export class PayHereGateway {
         currency: 'LKR',
         merchantSecret: this.settings.merchantSecret,
       }),
+      ...appIdentityFields(this.settings),
     };
     return {
       method: 'POST',

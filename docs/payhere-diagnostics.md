@@ -145,6 +145,26 @@ curl -4 -s https://ifconfig.me; echo   # must be the A record of api.welapathkad
 getent ahosts api.welapathkade.lk
 ```
 
+## Hosted pages answer "Unauthorized payment request"
+
+PayHere shows this on `/pay/checkout` and `/pay/preapprove` for an invalid
+hash or an unrecognised integration. The merchant secret is issued per
+Integrations entry (Domains & Credentials), and the entry type decides how
+PayHere matches the request:
+
+- **Domain** entry: matched by the browser's HTTP `Referer` header.
+- **App** entry (package name, e.g. `lk.welapathkade.user`): matched by the
+  `platform` and `referer` **form fields** that PayHere's mobile SDK sends
+  (`referer` is the package name). HTTP headers are ignored. Verified
+  2026-11-16 against the sandbox with curl: without the two fields every
+  request was rejected; with them the same merchant id, secret and hash
+  returned the card page.
+
+The gateway adds those fields when `PAYHERE_APP_PACKAGE_NAME` is set. They are
+not part of the hash. If the error appears again, check from the server that
+the variable is set, that the secret belongs to the App entry named by it,
+and that only one entry exists for the app.
+
 ## logrotate
 
 Install `/etc/logrotate.d/welapathkade-payhere`:

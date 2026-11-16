@@ -33,6 +33,7 @@ export function readPayHereSettings(config: ConfigService): PayHereSettings {
     notifyUrl: required(config, 'app.payhereNotifyUrl', 'PAYHERE_NOTIFY_URL'),
     returnUrl: required(config, 'app.payhereReturnUrl', 'PAYHERE_RETURN_URL'),
     cancelUrl: required(config, 'app.payhereCancelUrl', 'PAYHERE_CANCEL_URL'),
+    appPackageName: config.get<string>('app.payhereAppPackageName'),
   };
 }
 
