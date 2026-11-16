@@ -34,6 +34,11 @@ class ListAstrologersQueryDto {
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
   maxPrice?: number;
+
+  /** Exact district match after trim (case-insensitive on MySQL). */
+  @IsOptional()
+  @IsString()
+  district?: string;
 }
 
 @ApiTags('Astrologers')
@@ -51,12 +56,14 @@ export class AstrologersController {
   @ApiQuery({ name: 'serviceId', required: false })
   @ApiQuery({ name: 'minPrice', required: false })
   @ApiQuery({ name: 'maxPrice', required: false })
+  @ApiQuery({ name: 'district', required: false })
   @ApiOkResponse({ description: 'Public astrologer cards (no private fields)' })
   list(@Query() query: ListAstrologersQueryDto) {
     return this.astrologersService.listDiscoverable({
       serviceId: query.serviceId,
       minPrice: query.minPrice,
       maxPrice: query.maxPrice,
+      district: query.district,
     });
   }
 

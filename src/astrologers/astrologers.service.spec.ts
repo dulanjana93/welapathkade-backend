@@ -191,4 +191,28 @@ describe('AstrologersService', () => {
       reviewCount: 0,
     });
   });
+
+  it('filters discoverable profiles by district and price', async () => {
+    prisma.astrologerProfile.findMany.mockResolvedValue([]);
+    await service.listDiscoverable({
+      district: '  Colombo  ',
+      minPrice: 1000,
+      maxPrice: 2000,
+    });
+    expect(prisma.astrologerProfile.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          district: 'Colombo',
+          services: {
+            some: expect.objectContaining({
+              price: {
+                gte: expect.any(Prisma.Decimal),
+                lte: expect.any(Prisma.Decimal),
+              },
+            }),
+          },
+        }),
+      }),
+    );
+  });
 });

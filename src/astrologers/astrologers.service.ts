@@ -314,6 +314,7 @@ export class AstrologersService {
     serviceId?: string;
     minPrice?: number;
     maxPrice?: number;
+    district?: string;
   }) {
     const priceFilter: Prisma.DecimalFilter | undefined =
       filters.minPrice !== undefined || filters.maxPrice !== undefined
@@ -326,6 +327,7 @@ export class AstrologersService {
               : {}),
           }
         : undefined;
+    const district = filters.district?.trim() || undefined;
 
     const profiles = await this.prisma.astrologerProfile.findMany({
       where: {
@@ -334,6 +336,7 @@ export class AstrologersService {
           role: UserRole.ASTROLOGER,
           status: UserStatus.ACTIVE,
         },
+        ...(district ? { district } : {}),
         services: {
           some: {
             status: AstrologerServiceStatus.ACTIVE,
